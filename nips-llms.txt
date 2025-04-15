@@ -1,0 +1,1841 @@
+# Condensed Nostr NIPs Reference
+
+This document provides a condensed overview of Nostr Implementation Possibilities (NIPs), which define how Nostr-compatible relay and client software should function.
+
+## Table of Contents
+
+- [Core Protocol](#core-protocol)
+- [Events and Kinds](#events-and-kinds)
+- [Client-to-Relay Messages](#client-to-relay-messages)
+- [Relay-to-Client Messages](#relay-to-client-messages)
+- [NIPs Overview](#nips-overview)
+
+## Core Protocol
+
+Nostr is a simple, open protocol that enables global, decentralized, and censorship-resistant social media. It uses public key cryptography and a network of relays for message distribution.
+
+## Events and Kinds
+
+Events are the core data structure in Nostr. Each event has a defined kind that specifies its purpose.
+
+```json
+{
+  "id": "<32-bytes lowercase hex-encoded sha256 of the serialized event data>",
+  "pubkey": "<32-bytes lowercase hex-encoded public key of the event creator>",
+  "created_at": <unix timestamp in seconds>,
+  "kind": <integer between 0 and 65535>,
+  "tags": [
+    ["<arbitrary string>", "<arbitrary string>", ...],
+    // ...
+  ],
+  "content": "<arbitrary string>",
+  "sig": "<64-bytes lowercase hex of the signature of the sha256 hash of the serialized event data>"
+}
+```
+
+Common event kinds:
+- `0`: User Metadata
+- `1`: Short Text Note
+- `3`: Follows
+- `4`: Encrypted Direct Messages (deprecated)
+- `5`: Event Deletion Request
+- `6`: Repost
+- `7`: Reaction
+- Various other specialized kinds for specific purposes
+
+## Client-to-Relay Messages
+
+- `["EVENT", <event JSON>]`: Publishes an event
+- `["REQ", <subscription_id>, <filters>...]`: Requests events and subscribes to updates
+- `["CLOSE", <subscription_id>]`: Stops a subscription
+- `["AUTH", <event>]`: Authenticates using an event
+- `["COUNT", <subscription_id>, <filters>...]`: Requests event counts
+
+## Relay-to-Client Messages
+
+- `["EVENT", <subscription_id>, <event JSON>]`: Delivers an event
+- `["EOSE", <subscription_id>]`: Signals end of stored events
+- `["NOTICE", <message>]`: Sends a human-readable message
+- `["OK", <event_id>, <success>, <message>]`: Confirms event receipt
+- `["CLOSED", <subscription_id>, <message>]`: Notifies of subscription closure
+- `["AUTH", <challenge>]`: Requests authentication
+- `["COUNT", <subscription_id>, <count>]`: Returns event counts
+
+## NIPs Overview
+
+### NIP-01: Basic Protocol Flow Description
+
+The foundation of Nostr, describing events, signatures, client-relay communication, and basic kinds.
+
+```python
+# Example: Creating and signing an event
+import hashlib
+import json
+from secp256k1 import PrivateKey, PublicKey
+
+def create_event(private_key_hex, kind, content, tags=None):
+    if tags is None:
+        tags = []
+    
+    pubkey = PrivateKey(bytes.fromhex(private_key_hex)).pubkey.serialize()[1:].hex()
+    
+    event = {
+        "pubkey": pubkey,
+        "created_at": int(time.time()),
+        "kind": kind,
+        "tags": tags,
+        "content": content
+    }
+    
+    serialized = json.dumps([0, event["pubkey"], event["created_at"], 
+                             event["kind"], event["tags"], event["content"]], 
+                            separators=(',', ':'))
+    
+    event_hash = hashlib.sha256(serialized.encode()).hexdigest()
+    event["id"] = event_hash
+    
+    sig = PrivateKey(bytes.fromhex(private_key_hex)).ecdsa_sign_recoverable(bytes.fromhex(event_hash))
+    event["sig"] = bytes(PrivateKey(bytes.fromhex(private_key_hex)).ecdsa_serialize_compact(sig)).hex()
+    
+    return event
+```
+
+### NIP-02: Follow List
+
+Defines kind `3` for storing a user's follows list.
+
+```json
+{
+  "kind": 3,
+  "tags": [
+    ["p", "91cf9..4e5ca", "wss://alicerelay.com/", "alice"],
+    ["p", "14aeb..8dad4", "wss://bobrelay.com/nostr", "bob"],
+    ["p", "612ae..e610f", "ws://carolrelay.com/ws", "carol"]
+  ],
+  "content": ""
+}
+```
+
+### NIP-03: OpenTimestamps Attestations for Events
+
+Defines kind `1040` for storing OpenTimestamps proofs for events.
+
+```json
+{
+  "kind": 1040,
+  "tags": [
+    ["e", "<event-id>", "<relay-url>"],
+    ["alt", "opentimestamps attestation"]
+  ],
+  "content": "<base64-encoded OTS file data>"
+}
+```
+
+### NIP-04: Encrypted Direct Message (Deprecated)
+
+Deprecated in favor of NIP-17. Used kind `4` for encrypted DMs.
+
+```python
+# NIP-04 encryption
+import base64
+import hashlib
+import hmac
+from Crypto.Cipher import AES
+import secp256k1
+
+def encrypt(privkey, pubkey, text):
+    shared_point = secp256k1.PublicKey(bytes.fromhex("02" + pubkey), True).multiply(
+        bytes.fromhex(privkey)
+    )
+    shared_x = shared_point[1:33].hex()
+    
+    iv = secrets.token_bytes(16)
+    cipher = AES.new(bytes.fromhex(shared_x), AES.MODE_CBC, iv)
+    
+    padded_text = text + ' ' * (16 - (len(text) % 16))
+    encrypted = cipher.encrypt(padded_text.encode())
+    
+    return base64.b64encode(encrypted).decode() + "?iv=" + base64.b64encode(iv).decode()
+```
+
+### NIP-05: Mapping Nostr keys to DNS-based internet identifiers
+
+Associates Nostr pubkeys with identifiers like name@domain.com.
+
+```json
+// .well-known/nostr.json?name=bob
+{
+  "names": {
+    "bob": "b0635d6a9851d3aed0cd6c495b282167acf761729078d975fc341b22650b07b9"
+  },
+  "relays": {
+    "b0635d6a9851d3aed0cd6c495b282167acf761729078d975fc341b22650b07b9": [ 
+      "wss://relay.example.com", 
+      "wss://relay2.example.com" 
+    ]
+  }
+}
+```
+
+### NIP-06: Basic key derivation from mnemonic seed phrase
+
+Defines a standard way to derive Nostr keys from BIP-39 mnemonics.
+
+```python
+# Example of key derivation
+from bip32utils import BIP32Key
+from bip39 import phrase_to_seed
+
+def derive_key_from_mnemonic(mnemonic, passphrase=""):
+    seed = phrase_to_seed(mnemonic, passphrase)
+    root_key = BIP32Key.fromEntropy(seed)
+    
+    # m/44'/1237'/0'/0/0 for Nostr as per SLIP-44
+    derived_key = root_key.ChildKey(44 + 2**31).ChildKey(1237 + 2**31).ChildKey(0 + 2**31).ChildKey(0).ChildKey(0)
+    return derived_key.PrivateKey().hex()
+```
+
+### NIP-07: `window.nostr` capability for web browsers
+
+Defines a JS interface for browser extensions to provide Nostr functionality.
+
+```javascript
+// Interface of window.nostr
+window.nostr = {
+  // Required methods
+  async getPublicKey(): string, // Returns a hex pubkey
+  async signEvent(event): Event, // Signs an event object, adds id, pubkey, and sig
+  
+  // Optional methods
+  async nip04.encrypt(pubkey, plaintext): string, // NIP-04 encryption
+  async nip04.decrypt(pubkey, ciphertext): string, // NIP-04 decryption
+  async nip44.encrypt(pubkey, plaintext): string, // NIP-44 encryption
+  async nip44.decrypt(pubkey, ciphertext): string // NIP-44 decryption
+}
+```
+
+### NIP-08: Handling Mentions (Deprecated)
+
+Replaced by NIP-27. Defined the `#[index]` format for mentions.
+
+### NIP-09: Event Deletion Request
+
+Defines kind `5` for requesting deletion of events.
+
+```json
+{
+  "kind": 5,
+  "pubkey": "<pubkey>",
+  "tags": [
+    ["e", "dcd59..464a2"],
+    ["e", "968c5..ad7a4"],
+    ["a", "<kind>:<pubkey>:<d-identifier>"],
+    ["k", "1"],
+    ["k", "30023"]
+  ],
+  "content": "these posts were published by accident"
+}
+```
+
+### NIP-10: Text Notes and Threads
+
+Describes kind `1` as text notes and standardizes thread references.
+
+```json
+{
+  "kind": 1,
+  "content": "Replying to a thread",
+  "tags": [
+    ["e", "<root-id>", "<relay-url>", "root"],
+    ["e", "<reply-id>", "<relay-url>", "reply"],
+    ["p", "<pubkey>", "<relay-url>"]
+  ]
+}
+```
+
+### NIP-11: Relay Information Document
+
+Defines how relays can expose metadata about themselves via HTTP.
+
+```json
+// When requesting the relay with Accept: application/nostr+json header
+{
+  "name": "Example Relay",
+  "description": "A relay for Nostr examples",
+  "pubkey": "32-bytes-hex",
+  "contact": "admin@example.com",
+  "supported_nips": [1, 2, 4, 11, 15, 20],
+  "software": "https://github.com/example/relay",
+  "version": "1.0.0",
+  "limitation": {
+    "max_message_length": 16384,
+    "max_subscriptions": 20,
+    "max_filters": 100
+  }
+}
+```
+
+### NIP-13: Proof of Work
+
+Defines a way to add proof-of-work to events via a `nonce` tag.
+
+```python
+def count_leading_zeros(hash_hex):
+    total = 0
+    for char in hash_hex:
+        nibble = int(char, 16)
+        if nibble == 0:
+            total += 4
+        else:
+            # Count remaining zeros in the nibble
+            binary = bin(nibble)[2:].zfill(4)
+            for bit in binary:
+                if bit == '0':
+                    total += 1
+                else:
+                    return total
+    return total
+
+def mine_event(event, target_difficulty):
+    nonce = 0
+    while True:
+        event["tags"] = [tag for tag in event["tags"] if tag[0] != "nonce"]
+        event["tags"].append(["nonce", str(nonce), str(target_difficulty)])
+        
+        # Recalculate ID
+        serialized = json.dumps([0, event["pubkey"], event["created_at"], 
+                                 event["kind"], event["tags"], event["content"]], 
+                                separators=(',', ':'))
+        
+        event_hash = hashlib.sha256(serialized.encode()).hexdigest()
+        difficulty = count_leading_zeros(event_hash)
+        
+        if difficulty >= target_difficulty:
+            event["id"] = event_hash
+            return event
+        
+        nonce += 1
+```
+
+### NIP-14: Subject tag in Text events
+
+Defines an optional `subject` tag for kind `1` text notes.
+
+```json
+{
+  "kind": 1,
+  "content": "This is the content of the note",
+  "tags": [
+    ["subject", "This is the subject of the note"]
+  ]
+}
+```
+
+### NIP-15: Nostr Marketplace
+
+Defines events for creating marketplaces.
+
+```json
+// Example of a stall creation (kind: 30017)
+{
+  "kind": 30017,
+  "content": {
+    "id": "my-stall-1",
+    "name": "My Store",
+    "description": "Selling awesome products",
+    "currency": "BTC",
+    "shipping": [
+      {
+        "id": "zone1",
+        "name": "USA",
+        "cost": 5.0,
+        "regions": ["USA"]
+      }
+    ]
+  },
+  "tags": [["d", "my-stall-1"]]
+}
+```
+
+### NIP-17: Private Direct Messages
+
+Defines kinds `14` and `15` for encrypted direct messages using NIP-44 and NIP-59.
+
+```json
+// Plaintext direct message format (to be encrypted)
+{
+  "kind": 14,
+  "content": "Hello, this is a private message",
+  "tags": [
+    ["p", "<recipient-pubkey>", "<relay-url>"],
+    ["subject", "Message subject"]
+  ]
+}
+```
+
+### NIP-18: Reposts
+
+Defines kinds `6` and `16` for reposting events.
+
+```json
+{
+  "kind": 6,
+  "content": "{...stringified reposted note...}",
+  "tags": [
+    ["e", "<note-id>", "<relay-url>"],
+    ["p", "<original-author-pubkey>"]
+  ]
+}
+```
+
+### NIP-19: bech32-encoded entities
+
+Defines human-readable encodings for Nostr entities.
+
+```python
+import bech32
+
+def encode_pubkey(pubkey_hex):
+    """Convert a hex pubkey to npub format"""
+    data = bytes.fromhex(pubkey_hex)
+    words = bech32.convertbits(data, 8, 5)
+    return bech32.bech32_encode("npub", words)
+
+def encode_privkey(privkey_hex):
+    """Convert a hex private key to nsec format"""
+    data = bytes.fromhex(privkey_hex)
+    words = bech32.convertbits(data, 8, 5)
+    return bech32.bech32_encode("nsec", words)
+
+def encode_note(note_id_hex):
+    """Convert a hex note ID to note format"""
+    data = bytes.fromhex(note_id_hex)
+    words = bech32.convertbits(data, 8, 5)
+    return bech32.bech32_encode("note", words)
+```
+
+### NIP-20: Command Results (Moved to NIP-01)
+
+Defines the `OK` message format, now part of NIP-01.
+
+### NIP-21: `nostr:` URI scheme
+
+Defines a URI scheme for Nostr entities.
+
+```
+nostr:npub1sn0wdenkukak0d9dfczzeacvhkrgz92ak56egt7vdgzn8pv2wfqqhrjdv9
+nostr:note1fntxtkcy9pjwucqwa9mddn7v03wwwsu9j330jj350nvhpky2tuaspk6nqc
+```
+
+### NIP-22: Comment
+
+Defines kind `1111` for threaded comments.
+
+```json
+{
+  "kind": 1111,
+  "content": "This is a comment",
+  "tags": [
+    ["K", "30023"], // root kind
+    ["E", "<article-id>", "wss://relay.example.com", "<pubkey>"], // root scope
+    ["P", "<author-pubkey>", "wss://relay.example.com"], // root author
+    ["k", "1111"], // parent kind (if replying to another comment)
+    ["e", "<parent-comment-id>", "wss://relay.example.com", "<pubkey>"], // parent comment
+    ["p", "<parent-author-pubkey>", "wss://relay.example.com"] // parent author
+  ]
+}
+```
+
+### NIP-23: Long-form Content
+
+Defines kind `30023` for articles/blog posts and kind `30024` for drafts.
+
+```json
+{
+  "kind": 30023,
+  "content": "# Article Title\n\nThis is the content in markdown format...",
+  "tags": [
+    ["d", "article-identifier"],
+    ["title", "My Awesome Article"],
+    ["published_at", "1675642635"],
+    ["summary", "Brief description of the article"],
+    ["image", "https://example.com/image.jpg"],
+    ["t", "topic1"],
+    ["t", "topic2"]
+  ]
+}
+```
+
+### NIP-24: Extra metadata fields and tags
+
+Defines additional metadata for kind `0` and various other tags.
+
+```json
+// Kind 0 with extended metadata
+{
+  "kind": 0,
+  "content": "{\"name\":\"User\",\"display_name\":\"My Display Name\",\"about\":\"About me\",\"picture\":\"https://example.com/avatar.jpg\",\"banner\":\"https://example.com/banner.jpg\",\"website\":\"https://example.com\",\"birthday\":{\"year\":1990,\"month\":5,\"day\":10}}"
+}
+```
+
+### NIP-25: Reactions
+
+Defines kind `7` for reactions to events.
+
+```json
+{
+  "kind": 7,
+  "content": "+", // Like reaction, could also be an emoji
+  "tags": [
+    ["e", "<event-id>", "<relay-url>"],
+    ["p", "<event-author-pubkey>"],
+    ["k", "<event-kind>"]
+  ]
+}
+```
+
+### NIP-26: Delegated Event Signing
+
+Allows one key to sign events on behalf of another.
+
+```json
+{
+  "tags": [
+    ["delegation", 
+     "<delegator-pubkey>", 
+     "kind=1&created_at>1674834236&created_at<1677426236", 
+     "<delegation-token>"]
+  ]
+}
+```
+
+### NIP-27: Text Note References
+
+Standardizes `nostr:` URI references in kind `1` text notes.
+
+```
+In this note I'm mentioning nostr:npub1abcdef... and referencing nostr:note1abcdef...
+```
+
+### NIP-28: Public Chat
+
+Defines kinds `40-44` for public chat channels and messages.
+
+```json
+// Channel creation (kind 40)
+{
+  "kind": 40,
+  "content": "{\"name\": \"Demo Channel\", \"about\": \"A test channel.\", \"picture\": \"https://placekitten.com/200/200\", \"relays\": [\"wss://nos.lol\", \"wss://nostr.mom\"]}",
+  "tags": []
+}
+
+// Channel message (kind 42)
+{
+  "kind": 42,
+  "content": "Hello channel!",
+  "tags": [
+    ["e", "<channel_create_event_id>", "<relay-url>", "root"]
+  ]
+}
+```
+
+### NIP-29: Relay-based Groups
+
+Defines groups for relay-managed communities.
+
+```json
+// Group metadata (kind 39000)
+{
+  "kind": 39000,
+  "content": "",
+  "tags": [
+    ["d", "<group-id>"],
+    ["name", "Pizza Lovers"],
+    ["picture", "https://pizza.com/pizza.png"],
+    ["about", "a group for people who love pizza"],
+    ["public"], // or ["private"]
+    ["open"] // or ["closed"]
+  ]
+}
+
+// Message to group 
+{
+  "kind": 1,
+  "content": "Hello group!",
+  "tags": [
+    ["h", "<group-id>"]
+  ]
+}
+```
+
+### NIP-30: Custom Emoji
+
+Defines the `emoji` tag for custom emojis.
+
+```json
+{
+  "kind": 1,
+  "content": "Hello :soapbox: world!",
+  "tags": [
+    ["emoji", "soapbox", "https://example.com/emoji/soapbox.png"]
+  ]
+}
+```
+
+### NIP-31: Dealing with unknown event kinds
+
+Defines the `alt` tag for providing text descriptions of custom events.
+
+```json
+{
+  "kind": 1337,
+  "content": "...",
+  "tags": [
+    ["alt", "This is a specialized event containing code"]
+  ]
+}
+```
+
+### NIP-32: Labeling
+
+Defines kind `1985` for labeling events.
+
+```json
+{
+  "kind": 1985,
+  "tags": [
+    ["L", "com.example.ontology"],
+    ["l", "VI-hum", "com.example.ontology"],
+    ["p", "<pubkey1>", "<relay-url>"],
+    ["p", "<pubkey2>", "<relay-url>"]
+  ],
+  "content": "Reason for labeling this content"
+}
+```
+
+### NIP-33: Parameterized Replaceable Events (now in NIP-01)
+
+Renamed to "Addressable events" and moved to NIP-01.
+
+### NIP-34: `git` stuff
+
+Defines events for git-related functionality.
+
+```json
+// Repository announcement (kind 30617)
+{
+  "kind": 30617,
+  "content": "",
+  "tags": [
+    ["d", "my-repo"],
+    ["name", "My Project"],
+    ["description", "A cool project"],
+    ["web", "https://github.com/user/project"],
+    ["clone", "https://github.com/user/project.git"],
+    ["r", "<earliest-unique-commit-id>", "euc"]
+  ]
+}
+
+// Patch (kind 1617)
+{
+  "kind": 1617,
+  "content": "diff --git a/file.txt b/file.txt...",
+  "tags": [
+    ["a", "30617:<repo-owner-pubkey>:<repo-id>"],
+    ["r", "<earliest-unique-commit-id>"]
+  ]
+}
+```
+
+### NIP-35: Torrents
+
+Defines kind `2003` for sharing torrents.
+
+```json
+{
+  "kind": 2003,
+  "content": "<description>",
+  "tags": [
+    ["title", "<torrent-title>"],
+    ["x", "<bittorrent-info-hash>"],
+    ["file", "<file-name>", "<file-size-in-bytes>"],
+    ["tracker", "udp://mytracker.com:1337"],
+    ["i", "tcat:video,movie,4k"],
+    ["t", "movie"],
+    ["t", "4k"]
+  ]
+}
+```
+
+### NIP-36: Sensitive Content / Content Warning
+
+Defines the `content-warning` tag.
+
+```json
+{
+  "kind": 1,
+  "content": "sensitive content with #hashtag\n",
+  "tags": [
+    ["t", "hashtag"],
+    ["L", "content-warning"],
+    ["l", "reason", "content-warning"],
+    ["content-warning", "This content may be disturbing"]
+  ]
+}
+```
+
+### NIP-37: Draft Events
+
+Defines kind `31234` for storing drafts.
+
+```json
+{
+  "kind": 31234,
+  "tags": [
+    ["d", "<identifier>"],
+    ["k", "<kind of the draft event>"],
+    ["e", "<anchor event event id>", "<relay-url>"]
+  ],
+  "content": "<encrypted draft event JSON>"
+}
+```
+
+### NIP-38: User Statuses
+
+Defines kind `30315` for user status updates.
+
+```json
+{
+  "kind": 30315,
+  "content": "Working on a project",
+  "tags": [
+    ["d", "general"],
+    ["r", "https://github.com/user/project"]
+  ]
+}
+
+// Music status
+{
+  "kind": 30315,
+  "content": "Intergalatic - Beastie Boys",
+  "tags": [
+    ["d", "music"],
+    ["r", "spotify:search:Intergalatic%20-%20Beastie%20Boys"],
+    ["expiration", "1692845589"]
+  ]
+}
+```
+
+### NIP-39: External Identities in Profiles
+
+Defines the `i` tag for linking external identities.
+
+```json
+{
+  "kind": 0,
+  "tags": [
+    ["i", "github:username", "gist-id-with-verification"],
+    ["i", "twitter:username", "tweet-id-with-verification"],
+    ["i", "mastodon:instance.org/@username", "post-id-with-verification"]
+  ]
+}
+```
+
+### NIP-40: Expiration Timestamp
+
+Defines the `expiration` tag.
+
+```json
+{
+  "kind": 1,
+  "tags": [
+    ["expiration", "1600000000"]
+  ],
+  "content": "This message will expire at the specified timestamp"
+}
+```
+
+### NIP-42: Authentication of clients to relays
+
+Defines the `AUTH` message for client-relay authentication.
+
+```json
+// Challenge from relay
+["AUTH", "<challenge-string>"]
+
+// Response from client
+["AUTH", {
+  "kind": 22242,
+  "tags": [
+    ["relay", "wss://relay.example.com/"],
+    ["challenge", "challengestringhere"]
+  ],
+  // other event fields...
+}]
+```
+
+### NIP-44: Encrypted Payloads (Versioned)
+
+Defines a versioned encryption scheme for Nostr content.
+
+```python
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.backends import default_backend
+import chacha20poly1305
+import base64
+
+def nip44_encrypt(plaintext, shared_key, nonce):
+    # Derive keys using HKDF
+    hkdf = HKDF(
+        algorithm=hashes.SHA256(),
+        length=76,
+        salt=None,
+        info=nonce,
+        backend=default_backend()
+    )
+    derived_keys = hkdf.derive(shared_key)
+    
+    chacha_key = derived_keys[0:32]
+    chacha_nonce = derived_keys[32:44]
+    hmac_key = derived_keys[44:76]
+    
+    # Add padding
+    plaintext_length = len(plaintext)
+    padded_plaintext = plaintext_length.to_bytes(2, byteorder='big') + plaintext
+    
+    # Calculate padding size
+    padded_len = calc_padded_len(len(padded_plaintext))
+    padding = bytes(padded_len - len(padded_plaintext))
+    padded_plaintext += padding
+    
+    # Encrypt
+    cipher = chacha20poly1305.ChaCha20Poly1305(chacha_key)
+    ciphertext = cipher.encrypt(chacha_nonce, padded_plaintext, b"")
+    
+    # Calculate MAC
+    mac = hmac.new(hmac_key, nonce + ciphertext, hashlib.sha256).digest()
+    
+    # Combine and encode
+    result = bytes([0x02]) + nonce + ciphertext + mac
+    return base64.b64encode(result).decode()
+```
+
+### NIP-45: Event Counts
+
+Defines the `COUNT` message for fetching event counts.
+
+```
+// Request
+["COUNT", "sub1", {"kinds": [1], "authors": ["<pubkey>"]}]
+
+// Response
+["COUNT", "sub1", {"count": 42}]
+```
+
+### NIP-46: Nostr Remote Signing
+
+Defines a protocol for communication between clients and remote signers.
+
+```json
+// Request
+{
+  "kind": 24133,
+  "content": "<nip44-encrypted({\"id\":\"random-string\",\"method\":\"sign_event\",\"params\":[\"event-json\"]})>",
+  "tags": [["p", "<remote-signer-pubkey>"]],
+  // other fields
+}
+
+// Response
+{
+  "kind": 24133,
+  "content": "<nip44-encrypted({\"id\":\"random-string\",\"result\":\"signed-event-json\"})>",
+  "tags": [["p", "<client-pubkey>"]],
+  // other fields
+}
+```
+
+### NIP-47: Nostr Wallet Connect
+
+Defines a protocol for client-wallet communication over Nostr.
+
+```json
+// Wallet info event (kind 13194)
+{
+  "kind": 13194,
+  "content": "pay_invoice get_balance make_invoice",
+  "tags": [
+    ["notifications", "payment_received payment_sent"]
+  ]
+}
+
+// Request (kind 23194)
+{
+  "kind": 23194,
+  "content": "<nip04-encrypted({\"method\":\"pay_invoice\",\"params\":{\"invoice\":\"lnbc...\"}})",
+  "tags": [["p", "<wallet-pubkey>"]]
+}
+
+// Response (kind 23195)
+{
+  "kind": 23195,
+  "content": "<nip04-encrypted({\"result_type\":\"pay_invoice\",\"result\":{\"preimage\":\"0123456789abcdef...\"}})",
+  "tags": [["p", "<client-pubkey>"], ["e", "<request-id>"]]
+}
+```
+
+### NIP-48: Proxy Tags
+
+Defines the `proxy` tag for referencing content from other protocols.
+
+```json
+{
+  "kind": 1,
+  "content": "I'm vegan btw",
+  "tags": [
+    [
+      "proxy",
+      "https://gleasonator.com/objects/8f6fac53-4f66-4c6e-ac7d-92e5e78c3e79",
+      "activitypub"
+    ]
+  ]
+}
+```
+
+### NIP-49: Private Key Encryption
+
+Defines a method for secure key backup.
+
+```python
+import scrypt
+import os
+import base64
+import nacl.secret
+import nacl.utils
+
+def encrypt_private_key(private_key, password, log_n=18):
+    # Key security byte
+    key_security_byte = bytes([0x01])  # Not known to be handled insecurely
+    
+    # Generate salt
+    salt = os.urandom(16)
+    
+    # Derive key with scrypt
+    symmetric_key = scrypt.hash(password, salt, 1 << log_n, r=8, p=1, buflen=32)
+    
+    # Generate nonce
+    nonce = nacl.utils.random(24)
+    
+    # Encrypt with XChaCha20-Poly1305
+    box = nacl.secret.SecretBox(symmetric_key)
+    ciphertext = box.encrypt(private_key, nonce)
+    
+    # Construct the final output
+    version = bytes([0x02])
+    log_n_byte = bytes([log_n])
+    
+    output = version + log_n_byte + salt + nonce + key_security_byte + ciphertext
+    
+    # Encode with bech32
+    return bech32_encode("ncryptsec", output)
+```
+
+### NIP-50: Search Capability
+
+Defines a `search` field for REQ filters.
+
+```json
+{
+  "kinds": [1, 30023],
+  "search": "nostr protocol",
+  "limit": 20
+}
+```
+
+### NIP-51: Lists
+
+Defines standard and custom list kinds for storing various types of lists.
+
+```json
+// Mute list (kind 10000)
+{
+  "kind": 10000,
+  "tags": [
+    ["p", "pubkey1"],
+    ["p", "pubkey2"],
+    ["t", "hashtag-to-mute"],
+    ["word", "word-to-mute"]
+  ],
+  "content": "<encrypted private items>"
+}
+
+// Bookmarks (kind 10003)
+{
+  "kind": 10003,
+  "tags": [
+    ["e", "event1"],
+    ["a", "article1"],
+    ["r", "https://example.com"]
+  ],
+  "content": ""
+}
+
+// Custom curation set (kind 30004)
+{
+  "kind": 30004,
+  "tags": [
+    ["d", "curated-articles"],
+    ["name", "My Favorite Articles"],
+    ["picture", "https://example.com/image.jpg"],
+    ["about", "A collection of my favorite articles"],
+    ["a", "30023:pubkey1:article1"],
+    ["a", "30023:pubkey2:article2"]
+  ],
+  "content": ""
+}
+```
+
+### NIP-52: Calendar Events
+
+Defines kinds `31922`, `31923`, `31924`, and `31925` for calendar events.
+
+```json
+// Date-based calendar event (kind 31922)
+{
+  "kind": 31922,
+  "content": "Annual company meeting",
+  "tags": [
+    ["d", "company-meeting-2023"],
+    ["title", "Annual Company Meeting 2023"],
+    ["start", "2023-12-15"],
+    ["end", "2023-12-16"],
+    ["location", "Company HQ, Room A"]
+  ]
+}
+
+// Time-based calendar event (kind 31923)
+{
+  "kind": 31923,
+  "content": "Team call",
+  "tags": [
+    ["d", "team-call-123"],
+    ["title", "Weekly Team Call"],
+    ["start", "1674834236"],
+    ["end", "1674837836"],
+    ["start_tzid", "America/New_York"],
+    ["location", "https://meet.example.com/team"]
+  ]
+}
+```
+
+### NIP-53: Live Activities
+
+Defines kind `30311` for live events and `1311` for live chat messages.
+
+```json
+// Live event (kind 30311)
+{
+  "kind": 30311,
+  "tags": [
+    ["d", "conference-2023"],
+    ["title", "Nostr Conference 2023"],
+    ["summary", "Annual conference for Nostr developers"],
+    ["image", "https://example.com/banner.jpg"],
+    ["streaming", "https://stream.example.com/conf2023"],
+    ["starts", "1687182672"],
+    ["status", "live"],
+    ["p", "pubkey1", "wss://relay.example.com/", "Host"],
+    ["p", "pubkey2", "wss://relay.example.com/", "Speaker"]
+  ],
+  "content": ""
+}
+
+// Live chat message (kind 1311)
+{
+  "kind": 1311,
+  "tags": [
+    ["a", "30311:hostpubkey:conference-2023", "", "root"]
+  ],
+  "content": "Great presentation!"
+}
+```
+
+### NIP-54: Wiki
+
+Defines kind `30818` for wiki articles.
+
+```json
+{
+  "kind": 30818,
+  "content": "A wiki is a hypertext publication collaboratively edited and managed by its own audience.",
+  "tags": [
+    ["d", "wiki"],
+    ["title", "Wiki"],
+    ["summary", "Information about wikis"]
+  ]
+}
+```
+
+### NIP-55: Android Signer Application
+
+Defines a communication protocol for Android-based Nostr signers.
+
+```kotlin
+// Query for public key
+val result = context.contentResolver.query(
+    Uri.parse("content://com.example.signer.GET_PUBLIC_KEY"),
+    listOf("login"),
+    null,
+    null,
+    null
+)
+
+// Sign event
+val result = context.contentResolver.query(
+    Uri.parse("content://com.example.signer.SIGN_EVENT"),
+    listOf("$eventJson", "", "${logged_in_user_pubkey}"),
+    null,
+    null,
+    null
+)
+```
+
+### NIP-56: Reporting
+
+Defines kind `1984` for reporting content.
+
+```json
+{
+  "kind": 1984,
+  "tags": [
+    ["p", "<pubkey>", "nudity"],
+    ["L", "social.nos.ontology"],
+    ["l", "NS-nud", "social.nos.ontology"]
+  ],
+  "content": "Explicit content without warning"
+}
+```
+
+### NIP-57: Lightning Zaps
+
+Defines kinds `9734` (zap request) and `9735` (zap receipt) for lightning payments.
+
+```json
+// Zap request (not published to relays)
+{
+  "kind": 9734,
+  "content": "Zap!",
+  "tags": [
+    ["relays", "wss://relay1.example.com", "wss://relay2.example.com"],
+    ["amount", "21000"],
+    ["lnurl", "lnurl1dp68gurn8ghj7um5v93kketj9ehx2amn9uh8wetvdskkkmn0wahz7mrww4excup0dajx2mrv92x9xp"],
+    ["p", "recipient-pubkey"],
+    ["e", "event-being-zapped"]
+  ]
+}
+
+// Zap receipt (published to relays)
+{
+  "kind": 9735,
+  "tags": [
+    ["p", "recipient-pubkey"],
+    ["e", "zapped-event-id"],
+    ["bolt11", "lnbc..."],
+    ["description", "{zap request event JSON}"],
+    ["preimage", "payment-preimage"]
+  ],
+  "content": ""
+}
+```
+
+### NIP-58: Badges
+
+Defines kinds `30008`, `30009`, and `8` for badges.
+
+```json
+// Badge definition (kind 30009)
+{
+  "kind": 30009,
+  "tags": [
+    ["d", "bravery"],
+    ["name", "Medal of Bravery"],
+    ["description", "Awarded to users demonstrating bravery"],
+    ["image", "https://example.com/badges/bravery.png", "1024x1024"],
+    ["thumb", "https://example.com/badges/bravery_256x256.png", "256x256"]
+  ],
+  "content": ""
+}
+
+// Badge award (kind 8)
+{
+  "kind": 8,
+  "tags": [
+    ["a", "30009:creator-pubkey:bravery"],
+    ["p", "recipient1"],
+    ["p", "recipient2"]
+  ],
+  "content": ""
+}
+
+// Profile badges (kind 30008)
+{
+  "kind": 30008,
+  "tags": [
+    ["d", "profile_badges"],
+    ["a", "30009:creator-pubkey:bravery"],
+    ["e", "badge-award-event-id", "relay-url"]
+  ],
+  "content": ""
+}
+```
+
+### NIP-59: Gift Wrap
+
+Defines kinds `13` (seal) and `1059` (gift wrap) for encrypted event encapsulation.
+
+```json
+// Rumor (unsigned event to be sealed)
+{
+  "created_at": 1691518405,
+  "content": "Secret message",
+  "tags": [],
+  "kind": 1,
+  "pubkey": "sender-pubkey"
+}
+
+// Seal (kind 13)
+{
+  "content": "<encrypted rumor>",
+  "kind": 13,
+  "created_at": 1703015180,
+  "pubkey": "sender-pubkey",
+  "tags": [],
+  "id": "id",
+  "sig": "signature"
+}
+
+// Gift Wrap (kind 1059)
+{
+  "content": "<encrypted seal>",
+  "kind": 1059,
+  "created_at": 1703021488,
+  "pubkey": "random-pubkey",
+  "tags": [["p", "recipient-pubkey"]],
+  "id": "id",
+  "sig": "signature"
+}
+```
+
+### NIP-60: Cashu Wallets
+
+Defines events for storing Cashu tokens.
+
+```json
+// Wallet event (kind 17375)
+{
+  "kind": 17375,
+  "content": "<encrypted wallet data>",
+  "tags": []
+}
+
+// Token event (kind 7375)
+{
+  "kind": 7375,
+  "content": "<encrypted({\"mint\":\"https://mint.example.com\",\"proofs\":[...]})>",
+  "tags": []
+}
+
+// Spending history (kind 7376)
+{
+  "kind": 7376,
+  "content": "<encrypted([['direction', 'in'], ['amount', '100']])>",
+  "tags": [
+    ["e", "token-event-id", "", "redeemed"]
+  ]
+}
+```
+
+### NIP-61: Nutzaps
+
+Defines a protocol for P2PK Cashu-based zaps.
+
+```json
+// Recommendation event (kind 10019)
+{
+  "kind": 10019,
+  "tags": [
+    ["relay", "wss://relay1.example.com"],
+    ["mint", "https://mint.example.com", "sat"],
+    ["pubkey", "<p2pk-pubkey>"]
+  ]
+}
+
+// Nutzap event (kind 9321)
+{
+  "kind": 9321,
+  "content": "Thanks for this great idea.",
+  "pubkey": "<sender-pubkey>",
+  "tags": [
+    ["proof", "{\"amount\":1,\"C\":\"02277...\",\"id\":\"000a93d6f8a1d2c4\",\"secret\":\"[\\\"P2PK\\\",...]}"],
+    ["u", "https://mint.example.com"],
+    ["e", "<nutzapped-event-id>", "<relay-hint>"],
+    ["p", "<recipient-pubkey>"]
+  ]
+}
+```
+
+### NIP-62: Request to Vanish
+
+Defines kind `62` for requesting event deletion.
+
+```json
+{
+  "kind": 62,
+  "pubkey": "<user-pubkey>",
+  "tags": [
+    ["relay", "wss://relay.example.com"]
+  ],
+  "content": "I want to remove all my content from this relay"
+}
+```
+
+### NIP-64: Chess (PGN)
+
+Defines kind `64` for chess games.
+
+```json
+{
+  "kind": 64,
+  "content": "[Event \"F/S Return Match\"]\n[Site \"Belgrade, Serbia JUG\"]\n[Date \"1992.11.04\"]\n[Round \"29\"]\n[White \"Fischer, Robert J.\"]\n[Black \"Spassky, Boris V.\"]\n[Result \"1/2-1/2\"]\n\n1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 6. Re1 b5 7. Bb3 d6 8. c3 O-O",
+  "tags": [
+    ["alt", "Fischer vs. Spassky (1992), Round 29, Draw"]
+  ]
+}
+```
+
+### NIP-65: Relay List Metadata
+
+Defines kind `10002` for advertising preferred relays.
+
+```json
+{
+  "kind": 10002,
+  "tags": [
+    ["r", "wss://relay1.example.com"],
+    ["r", "wss://relay2.example.com", "read"],
+    ["r", "wss://relay3.example.com", "write"]
+  ],
+  "content": ""
+}
+```
+
+### NIP-66: Relay Discovery and Liveness Monitoring
+
+Defines kinds `30166` and `10166` for relay discovery.
+
+```json
+// Relay discovery (kind 30166)
+{
+  "kind": 30166,
+  "content": "{}",
+  "tags": [
+    [ "d", "wss://relay.example.com/" ],
+    [ "n", "clearnet" ],
+    [ "N", "42" ],
+    [ "R", "!payment" ]
+  ]
+}
+
+// Relay monitor announcement (kind 10166)
+{
+  "kind": 10166,
+  "content": "",
+  "tags": [
+    [ "frequency", "3600" ],
+    [ "timeout", "2000", "open" ],
+    [ "c", "ws" ],
+    [ "c", "nip11" ]
+  ]
+}
+```
+
+### NIP-68: Picture-first feeds
+
+Defines kind `20` for picture posts.
+
+```json
+{
+  "kind": 20,
+  "content": "Beautiful sunset!",
+  "tags": [
+    ["title", "Evening at the beach"],
+    ["imeta", 
+      "url https://example.com/sunset.jpg",
+      "m image/jpeg",
+      "blurhash eVF$^OI:${M{o#*0-nNFxakD-?xVM}WEWB%iNKxvR-oetmo#R-aen$",
+      "dim 3024x4032",
+      "alt A beautiful sunset at the beach"
+    ],
+    ["t", "photography"],
+    ["t", "sunset"]
+  ]
+}
+```
+
+### NIP-69: Peer-to-peer Order events
+
+Defines kind `38383` for P2P market orders.
+
+```json
+{
+  "kind": 38383,
+  "tags": [
+    ["d", "ede61c96-4c13-4519-bf3a-dcf7f1e9d842"],
+    ["k", "sell"],
+    ["f", "VES"],
+    ["s", "pending"],
+    ["amt", "0"],
+    ["fa", "100"],
+    ["pm", "face to face", "bank transfer"],
+    ["premium", "1"],
+    ["network", "mainnet"],
+    ["layer", "lightning"],
+    ["g", "<geohash>"],
+    ["expiration", "1719391096"],
+    ["z", "order"]
+  ],
+  "content": ""
+}
+```
+
+### NIP-70: Protected Events
+
+Defines the `-` tag to mark events that can only be published by their author.
+
+```json
+{
+  "kind": 1,
+  "tags": [["-"]],
+  "content": "This event can only be published by me"
+}
+```
+
+### NIP-71: Video Events
+
+Defines kinds `21` (normal video) and `22` (short-form video).
+
+```json
+{
+  "kind": 21,
+  "content": "My new tutorial video",
+  "tags": [
+    ["title", "How to use Nostr"],
+    ["imeta", 
+      "dim 1920x1080",
+      "url https://example.com/video.mp4",
+      "x 3093509d1e0bc604ff60cb9286f4cd7c781553bc8991937befaacfdc28ec5cdc",
+      "m video/mp4",
+      "image https://example.com/thumbnail.jpg"
+    ],
+    ["duration", "600"],
+    ["t", "tutorial"]
+  ]
+}
+```
+
+### NIP-72: Moderated Communities
+
+Defines kinds `34550` and `4550` for Reddit-style communities.
+
+```json
+// Community definition (kind 34550)
+{
+  "kind": 34550,
+  "tags": [
+    ["d", "nostr-dev"],
+    ["name", "Nostr Development"],
+    ["description", "Discussion about Nostr development"],
+    ["image", "https://example.com/community.jpg"],
+    ["p", "moderator1", "", "moderator"],
+    ["p", "moderator2", "", "moderator"],
+    ["relay", "wss://relay.example.com"]
+  ],
+  "content": ""
+}
+
+// Post to community
+{
+  "kind": 1,
+  "tags": [
+    ["a", "34550:community-creator-pubkey:nostr-dev", "wss://relay.example.com"]
+  ],
+  "content": "Has anyone implemented NIP-72 yet?"
+}
+
+// Approval (kind 4550)
+{
+  "kind": 4550,
+  "tags": [
+    ["a", "34550:community-creator-pubkey:nostr-dev", "wss://relay.example.com"],
+    ["e", "post-id", "wss://relay.example.com"],
+    ["p", "post-author-pubkey"],
+    ["k", "1"]
+  ],
+  "content": "<json of approved post>"
+}
+```
+
+### NIP-73: External Content IDs
+
+Defines the `i` tag for external content identifiers.
+
+```json
+{
+  "tags": [
+    ["i", "https://example.com/article"],
+    ["k", "web"]
+  ]
+}
+
+{
+  "tags": [
+    ["i", "isbn:9780765382030"],
+    ["k", "isbn"]
+  ]
+}
+
+{
+  "tags": [
+    ["i", "podcast:guid:c90e609a-df1e-596a-bd5e-57bcc8aad6cc"],
+    ["k", "podcast:guid"]
+  ]
+}
+```
+
+### NIP-75: Zap Goals
+
+Defines kind `9041` for fundraising goals.
+
+```json
+{
+  "kind": 9041,
+  "tags": [
+    ["relays", "wss://relay1.example.com", "wss://relay2.example.com"],
+    ["amount", "21000000"],
+    ["closed_at", "1715691139"],
+    ["image", "https://example.com/fundraiser.jpg"],
+    ["summary", "Help fund the next Nostr conference!"]
+  ],
+  "content": "Nostr Conference 2023 Funding"
+}
+```
+
+### NIP-78: Application-specific data
+
+Defines kind `30078` for app-specific data storage.
+
+```json
+{
+  "kind": 30078,
+  "tags": [
+    ["d", "app-preferences"]
+  ],
+  "content": "{\"theme\":\"dark\",\"fontSize\":16}"
+}
+```
+
+### NIP-84: Highlights
+
+Defines kind `9802` for saving highlights from content.
+
+```json
+{
+  "kind": 9802,
+  "content": "The key innovation of Nostr is its simplicity.",
+  "tags": [
+    ["r", "https://example.com/nostr-article"],
+    ["p", "article-author-pubkey", "", "author"],
+    ["context", "Nostr is a simple, open protocol that enables global, decentralized, and censorship-resistant social media."]
+  ]
+}
+```
+
+### NIP-86: Relay Management API
+
+Defines a JSON-RPC-like API for relay management.
+
+```http
+POST /
+Content-Type: application/nostr+json+rpc
+Authorization: <NIP-98 AUTH event>
+
+{
+  "method": "banpubkey",
+  "params": ["<pubkey>", "spam"]
+}
+```
+
+### NIP-88: Polls
+
+Defines kinds `1068` (poll) and `1018` (poll response).
+
+```json
+// Poll (kind 1068)
+{
+  "kind": 1068,
+  "content": "What's your favorite Nostr client?",
+  "tags": [
+    ["option", "a1b2c3", "Damus"],
+    ["option", "d4e5f6", "Amethyst"],
+    ["option", "g7h8i9", "Iris"],
+    ["relay", "wss://relay.example.com"],
+    ["polltype", "singlechoice"],
+    ["endsAt", "1714078911"]
+  ]
+}
+
+// Response (kind 1018)
+{
+  "kind": 1018,
+  "tags": [
+    ["e", "poll-id"],
+    ["response", "a1b2c3"]
+  ],
+  "content": ""
+}
+```
+
+### NIP-89: Recommended Application Handlers
+
+Defines kinds `31989` and `31990` for application handler discovery.
+
+```json
+// Handler recommendation (kind 31989)
+{
+  "kind": 31989,
+  "tags": [
+    ["d", "1337"],
+    ["a", "31990:app-pubkey:app-id", "wss://relay.example.com", "web"]
+  ],
+  "content": ""
+}
+
+// Handler information (kind 31990)
+{
+  "kind": 31990,
+  "content": "{\"name\":\"Code Viewer\",\"about\":\"An app for viewing code snippets\"}",
+  "tags": [
+    ["d", "code-viewer"],
+    ["k", "1337"],
+    ["web", "https://codeviewer.app/e/{bech32}"]
+  ]
+}
+```
+
+### NIP-90: Data Vending Machine
+
+Defines kinds `5000-5999` (job requests), `6000-6999` (job results), and `7000` (job feedback).
+
+```json
+// Job request (kind 5xxx)
+{
+  "kind": 5001,
+  "tags": [
+    ["i", "Convert this speech to text", "text"],
+    ["output", "text/plain"],
+    ["bid", "10000"],
+    ["relays", "wss://relay.example.com"]
+  ],
+  "content": ""
+}
+
+// Job result (kind 6xxx)
+{
+  "kind": 6001,
+  "tags": [
+    ["request", "<job-request-json>"],
+    ["e", "<job-request-id>", "<relay-hint>"],
+    ["i", "<input-data>"],
+    ["p", "<customer-pubkey>"],
+    ["amount", "10000", "<bolt11>"]
+  ],
+  "content": "Here is the transcription of your speech..."
+}
+```
+
+### NIP-92: Media Attachments
+
+Defines the `imeta` tag for media attachments.
+
+```json
+{
+  "content": "Check out this photo! https://example.com/photo.jpg",
+  "kind": 1,
+  "tags": [
+    [
+      "imeta",
+      "url https://example.com/photo.jpg",
+      "m image/jpeg",
+      "blurhash eVF$^OI:${M{o#*0-nNFxakD-?xVM}WEWB%iNKxvR-oetmo#R-aen$",
+      "dim 3024x4032",
+      "alt A scenic photo overlooking the coast"
+    ]
+  ]
+}
+```
+
+### NIP-94: File Metadata
+
+Defines kind `1063` for file metadata.
+
+```json
+{
+  "kind": 1063,
+  "tags": [
+    ["url", "https://example.com/document.pdf"],
+    ["m", "application/pdf"],
+    ["x", "5d2899290e0e69bcd809949ee516a4a1597205390878f780c098707a7f18e3df"],
+    ["ox", "5d2899290e0e69bcd809949ee516a4a1597205390878f780c098707a7f18e3df"],
+    ["size", "1024576"],
+    ["alt", "Research paper on Nostr protocol"]
+  ],
+  "content": "My research paper on the Nostr protocol"
+}
+```
+
+### NIP-96: HTTP File Storage Integration
+
+Defines a REST API for HTTP file storage servers for Nostr.
+
+```json
+// /.well-known/nostr/nip96.json
+{
+  "api_url": "https://files.example.com/api",
+  "supported_nips": [60, 98],
+  "plans": {
+    "free": {
+      "name": "Free Tier",
+      "max_byte_size": 10485760,
+      "file_expiration": [14, 90]
+    }
+  }
+}
+
+// File preference list (kind 10096)
+{
+  "kind": 10096,
+  "content": "",
+  "tags": [
+    ["server", "https://files.example.com"],
+    ["server", "https://fileserver.nostr.org"]
+  ]
+}
+```
+
+### NIP-98: HTTP Auth
+
+Defines kind `27235` for authorizing HTTP requests.
+
+```json
+// Auth event
+{
+  "kind": 27235,
+  "created_at": 1682327852,
+  "tags": [
+    ["u", "https://api.example.com/endpoint"],
+    ["method", "GET"],
+    ["payload", "<sha256-hex>"]
+  ],
+  "content": ""
+}
+
+// HTTP header
+Authorization: Nostr <base64-encoded-event>
+```
+
+### NIP-99: Classified Listings
+
+Defines kind `30402` for classified listings and `30403` for drafts.
+
+```json
+{
+  "kind": 30402,
+  "tags": [
+    ["d", "used-laptop-for-sale"],
+    ["title", "MacBook Pro for Sale"],
+    ["published_at", "1675642635"],
+    ["summary", "2021 MacBook Pro M1 Pro, 16GB RAM, 512GB SSD"],
+    ["location", "New York City"],
+    ["price", "1200", "USD"],
+    ["t", "electronics"],
+    ["t", "laptop"]
+  ],
+  "content": "Selling my MacBook Pro in excellent condition. Only 10 months old..."
+}
+```
+
+### NIP-C0: Code Snippets
+
+Defines kind `1337` for code snippets.
+
+```json
+{
+  "kind": 1337,
+  "content": "function helloWorld() {\n  console.log('Hello, Nostr!');\n}\n\nhelloWorld();",
+  "tags": [
+    ["l", "javascript"],
+    ["extension", "js"],
+    ["name", "hello-world.js"],
+    ["description", "A basic JavaScript function that prints 'Hello, Nostr!' to the console"],
+    ["runtime", "node v18.15.0"],
+    ["license", "MIT"]
+  ]
+}
+```
+
+### NIP-C7: Chats
+
+Defines kind `9` for chat messages.
+
+```json
+{
+  "kind": 9,
+  "content": "GM",
+  "tags": []
+}
+
+// Reply
+{
+  "kind": 9,
+  "content": "nostr:nevent1...\nGM to you too!",
+  "tags": [
+    ["q", "<event-id>", "<relay-url>", "<pubkey>"]
+  ]
+}
+```
+
+### NIP-7D: Threads
+
+Defines kind `11` for threads.
+
+```json
+// Thread
+{
+  "kind": 11,
+  "content": "Good morning",
+  "tags": [
+    ["subject", "GM"]
+  ]
+}
+
+// Reply (using NIP-22)
+{
+  "kind": 1111,
+  "content": "Cool beans",
+  "tags": [
+    ["K", "11"],
+    ["E", "<event-id>", "<relay-url>", "<pubkey>"]
+  ]
+}
+```
+

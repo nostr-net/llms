@@ -1,0 +1,1487 @@
+# Rust-Nostr Python Bindings - Complete Guide
+
+This guide provides comprehensive information for building Nostr applications using the rust-nostr Python bindings. It's designed as a reference for developers working with the Nostr protocol through these bindings.
+
+## Table of Contents
+- [Introduction to Nostr](#introduction-to-nostr)
+- [Getting Started](#getting-started)
+- [Key Management](#key-management)
+- [Events](#events)
+- [Filters](#filters)
+- [Relays and Clients](#relays-and-clients)
+- [Common NIPs Implementation](#common-nips-implementation)
+- [Advanced Features](#advanced-features)
+- [Practical Examples](#practical-examples)
+
+## Introduction to Nostr
+
+Nostr (Notes and Other Stuff Transmitted by Relays) is a simple, open protocol that enables global, decentralized, and censorship-resistant social media. It uses public key cryptography and a network of relays for message distribution.
+
+Core components:
+- **Events**: The basic data structure containing content
+- **Keys**: Public/private key pairs for signing and identity
+- **Relays**: Servers that receive, store, and serve events
+- **Clients**: Applications that interact with relays to publish and fetch events
+
+## Getting Started
+
+### Installation
+
+```bash
+pip install nostr-sdk
+```
+
+### Basic Hello World
+
+```python
+import asyncio
+from nostr_sdk import Keys, Client, EventBuilder, NostrSigner
+
+async def hello():
+    # Generate keys
+    keys = Keys.generate()
+    signer = NostrSigner.keys(keys)
+    client = Client(signer)
+    
+    # Connect to a relay
+    await client.add_relay("wss://relay.damus.io")
+    await client.connect()
+    
+    # Publish a note
+    builder = EventBuilder.text_note("Hello, rust-nostr!")
+    output = await client.send_event_builder(builder)
+    
+    # Print results
+    print(f"Event ID: {output.id.to_bech32()}")
+    print(f"Sent to: {output.success}")
+    print(f"Not sent to: {output.failed}")
+
+if __name__ == '__main__':
+   asyncio.run(hello())
+```
+
+## Key Management
+
+### Generating and Managing Keys
+
+```python
+from nostr_sdk import Keys, SecretKey
+
+# Generate new keys
+keys = Keys.generate()
+public_key = keys.public_key()
+secret_key = keys.secret_key()
+
+print(f"Public key (hex): {public_key.to_hex()}")
+print(f"Secret key (hex): {secret_key.to_hex()}")
+print(f"Public key (bech32): {public_key.to_bech32()}")
+print(f"Secret key (bech32): {secret_key.to_bech32()}")
+
+# Restore keys from nsec or hex
+keys = Keys.parse("nsec1j4c6269y9w0q2er2xjw8sv2ehyrtfxq3jwgdlxj6qfn8z4gjsq5qfvfk99")
+
+# Or from secret key
+secret_key = SecretKey.parse("6b911fd37cdf5c81d4c0adb1ab7fa822ed253ab0ad9aa18d77257c88b29b718e")
+keys = Keys(secret_key)
+```
+
+### Using Seed Phrases (NIP-06)
+
+```python
+# Using mnemonic package for BIP39
+from mnemonic import Mnemonic
+from nostr_sdk import Keys
+
+# Generate 24-word seed phrase
+words = Mnemonic("english").generate(strength=256)
+passphrase = ""
+
+# Generate keys from seed phrase
+keys = Keys.from_mnemonic(words, passphrase)
+print(f" Seed Words (24)  : {words}")
+print(f" Public key bech32: {keys.public_key().to_bech32()}")
+print(f" Secret key bech32: {keys.secret_key().to_bech32()}")
+
+# Multiple accounts from same seed phrase
+words = "leader monkey parrot ring guide accident before fence cannon height naive bean"
+passphrase = ""
+
+for account in range(0, 3):
+    nsec = Keys.from_mnemonic(words, passphrase, account).secret_key().to_bech32()
+    print(f"Account #{account} bech32: {nsec}")
+```
+
+### Encrypted Private Keys (NIP-49)
+
+```python
+from nostr_sdk import SecretKey, EncryptedSecretKey, KeySecurity
+
+# Parse secret key
+secret_key = SecretKey.parse("3501454135014541350145413501453fefb02227e449e57cf4d3a3ce05378683")
+
+# Encrypt with default settings
+password = "nostr"
+encrypted = secret_key.encrypt(password)
+print(f"Encrypted secret key: {encrypted.to_bech32()}")
+
+# Custom encryption parameters
+encrypted_custom = EncryptedSecretKey(secret_key, password, 12, KeySecurity.WEAK)
+print(f"Encrypted secret key (custom): {encrypted_custom.to_bech32()}")
+
+# Decrypt
+encrypted = EncryptedSecretKey.from_bech32("ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p")
+decrypted_key = encrypted.decrypt("nostr")
+print(f"Decrypted secret key: {decrypted_key.to_bech32()}")
+```
+
+## Events
+
+Events are the core data structure in Nostr. Each event has a defined kind that specifies its purpose.
+
+### Event Structure
+
+```json
+{
+  "id": "<32-bytes lowercase hex-encoded sha256 of the serialized event data>",
+  "pubkey": "<32-bytes lowercase hex-encoded public key of the event creator>",
+  "created_at": <unix timestamp in seconds>,
+  "kind": <integer between 0 and 65535>,
+  "tags": [
+    ["<tag-identifier>", "<tag-value>", ...],
+    // ...
+  ],
+  "content": "<arbitrary string>",
+  "sig": "<64-bytes lowercase hex of the signature of the sha256 hash of the serialized event data>"
+}
+```
+
+### Creating Events with EventBuilder
+
+```python
+import asyncio
+from nostr_sdk import Keys, EventBuilder, Kind, Tag, NostrSigner, Timestamp
+
+async def create_events():
+    keys = Keys.generate()
+    signer = NostrSigner.keys(keys)
+    
+    # Standard text note (kind 1)
+    builder1 = EventBuilder.text_note("Hello")
+    event1 = await builder1.sign(signer)
+    print(event1.as_json())
+    
+    # Custom event with additional options
+    tag = Tag.alt("POW text-note")
+    custom_timestamp = Timestamp.from_secs(1737976769)
+    builder2 = EventBuilder.text_note("Hello with POW").tags([tag]).pow(20).custom_created_at(custom_timestamp)
+    event2 = await builder2.sign(signer)
+    print(event2.as_json())
+    
+    # Custom kind event
+    kind = Kind(33001) # Custom kind
+    builder3 = EventBuilder(kind, "My custom event")
+    event3 = await builder3.sign(signer)
+    print(event3.as_json())
+
+if __name__ == '__main__':
+   asyncio.run(create_events())
+```
+
+### Working with Event IDs
+
+```python
+from nostr_sdk import EventId, Keys, Timestamp, Kind, EventBuilder, Tags
+
+# Create event ID directly (rarely needed)
+keys = Keys.generate()
+event_id = EventId(keys.public_key(), Timestamp.now(), Kind(1), Tags(), "content")
+
+# Convert formats
+event_id_hex = event_id.to_hex()
+event_id_bech32 = event_id.to_bech32()
+event_id_nostr_uri = event_id.to_nostr_uri()
+event_id_bytes = event_id.as_bytes()
+
+# Parse formats
+from_hex = EventId.parse(event_id_hex)
+from_bech32 = EventId.parse(event_id_bech32)
+from_uri = EventId.parse(event_id_nostr_uri)
+from_bytes = EventId.from_bytes(event_id_bytes)
+
+# Get ID from an event
+event = EventBuilder.text_note("This is a note").sign_with_keys(keys)
+print(f"Event ID: {event.id()}")
+print(f"Verify the ID & Signature: {event.verify()}")
+```
+
+### Event Kinds
+
+```python
+from nostr_sdk import Kind, KindStandard, EventBuilder, Keys, Metadata
+
+# Create kind from integer
+kind1 = Kind(1)  # Text note
+kind0 = Kind(0)  # Metadata
+kind3 = Kind(3)  # Contacts list
+
+# Create kind from enum
+kind_note = Kind.from_std(KindStandard.TEXT_NOTE)  # Kind 1
+kind_meta = Kind.from_std(KindStandard.METADATA)  # Kind 0
+kind_contacts = Kind.from_std(KindStandard.CONTACT_LIST)  # Kind 3
+
+# Testing kind properties
+custom_kind = Kind(30001)
+print(f"Is addressable?: {custom_kind.is_addressable()}")  # Kinds 30000-39999
+
+kind_ephemeral = Kind(20001)
+print(f"Is ephemeral?: {kind_ephemeral.is_ephemeral()}")  # Kinds 20000-29999
+
+kind_replaceable = Kind(10001)
+print(f"Is replaceable?: {kind_replaceable.is_replaceable()}")  # Kinds 10000-19999
+```
+
+### JSON Serialization
+
+```python
+from nostr_sdk import Event
+
+# Parse event from JSON
+json_str = '{"content":"uRuvYr585B80L6rSJiHocw==?iv=oh6LVqdsYYol3JfFnXTbPA==","created_at":1640839235,"id":"2be17aa3031bdcb006f0fce80c146dea9c1c0268b0af2398bb673365c6444d45","kind":4,"pubkey":"f86c44a2de95d9149b51c6a29afeabba264c18e2fa7c49de93424a0c56947785","sig":"a5d9290ef9659083c490b303eb7ee41356d8778ff19f2f91776c8dc4443388a64ffcf336e61af4c25c05ac3ae952d1ced889ed655b67790891222aaa15b99fdd","tags":[["p","13adc511de7e1cfcf1c6b7f6365fb5a03442d7bcacf565ea57fa7770912c023d"]]}'
+
+event = Event.from_json(json_str)
+
+# Serialize to JSON
+json_output = event.as_json()
+print(json_output)
+
+# Pretty print
+print(event.as_pretty_json())
+```
+
+## Tags
+
+Tags are multi-purpose arrays attached to events that provide additional context and create relationships between events.
+
+### Common Tags
+
+```python
+from typing import cast
+from nostr_sdk import EventBuilder, Keys, Tag, Contact, Coordinate, Kind, RelayMetadata, TagKind
+
+# Generate keys for examples
+keys = Keys.generate()
+
+# Single Letter Tags
+tag_event = Tag.event(event.id())  # e tag: reference an event
+tag_pubkey = Tag.public_key(keys.public_key())  # p tag: reference a pubkey
+tag_coordinate = Tag.coordinate(Coordinate(Kind(0), keys.public_key()))  # a tag: reference an addressable event
+tag_identifier = Tag.identifier("my-identifier")  # d tag: unique identifier
+tag_relay = Tag.relay_metadata("wss://relay.example.com", RelayMetadata.READ)  # r tag: relay hint
+tag_hashtag = Tag.hashtag("#nostr")  # t tag: hashtag
+
+# Custom Tags
+tag_summary = Tag.custom(cast(TagKind, TagKind.SUMMARY()), ["This is a summary"])
+tag_amount = Tag.custom(cast(TagKind, TagKind.AMOUNT()), ["42"])
+tag_title = Tag.custom(cast(TagKind, TagKind.TITLE()), ["This is a title"])
+tag_subject = Tag.custom(cast(TagKind, TagKind.SUBJECT()), ["This is a subject"])
+tag_description = Tag.custom(cast(TagKind, TagKind.DESCRIPTION()), ["This is a description"])
+tag_url = Tag.custom(cast(TagKind, TagKind.URL()), ["https://example.com"])
+
+# Parse raw tags
+tag_label_ns = Tag.parse(["L", "Label Namespace"])
+tag_label_val = Tag.parse(["l", "Label Value"])
+
+# Access tag properties
+print(f"Tag kind: {tag_pubkey.kind()}")
+print(f"Tag letter: {tag_pubkey.single_letter_tag()}")
+print(f"Tag content: {tag_pubkey.content()}")
+print(f"Tag as standardized: {tag_pubkey.as_standardized()}")
+print(f"Tag as vector: {tag_pubkey.as_vec()}")
+```
+
+## Filters
+# IMPORTANT: When using client.fetch_events(), pass the filter directly - NOT in a list
+# Correct:   await client.fetch_events(filter, timeout)
+# Incorrect: await client.fetch_events([filter], timeout)
+
+# When using client.subscribe(), pass filters as a list
+# Correct:   await client.subscribe([filter1, filter2], None)
+
+Filters are used to query events from relays.
+
+### Creating Filters
+
+```python
+from nostr_sdk import Filter, Alphabet, Keys, SingleLetterTag, Kind, KindStandard, Timestamp
+import time, datetime
+
+# Generate keys for examples
+keys = Keys.generate()
+event = EventBuilder.text_note("Hello World!").sign_with_keys(keys)
+
+# Filter for specific event ID
+filter_id = Filter().id(event.id())
+
+# Filter for specific author
+filter_author = Filter().author(keys.public_key())
+
+# Filter by pubkey and kind
+filter_pk_kind = Filter().pubkey(keys.public_key()).kind(Kind(1))
+
+# Filter by search string
+filter_search = Filter().search("Nostr Protocol")
+
+# Filter with timeframe
+date = datetime.datetime(2009, 1, 3, 0, 0)
+timestamp = int(time.mktime(date.timetuple()))
+since_ts = Timestamp.from_secs(timestamp)
+until_ts = Timestamp.now()
+
+filter_timeframe = Filter().pubkey(keys.public_key()).since(since_ts).until(until_ts)
+
+# Limit results
+filter_limit = Filter().author(keys.public_key()).limit(10)
+
+# Filter for hashtags
+filter_hashtags = Filter().hashtags(["#Bitcoin", "#Nostr"])
+
+# Filter for references
+filter_reference = Filter().reference("My reference")
+
+# Modifying filters
+filter_multi = Filter().pubkeys([keys.public_key()]).kinds([Kind(0), Kind(1)]).author(keys.public_key())
+
+# Add an additional kind
+filter_multi = filter_multi.kinds([Kind(4)])
+
+# Remove filters
+filter_multi = filter_multi.remove_kinds([Kind(0)])
+filter_multi = filter_multi.remove_pubkeys([keys.public_key()])
+
+# Testing if an event matches a filter
+does_match = filter_pk_kind.match_event(event)
+```
+
+
+## Relays and Clients
+
+### Basic Client Usage
+
+```python
+import asyncio
+from nostr_sdk import Keys, Client, EventBuilder, NostrSigner, Filter, Kind, Timestamp
+from datetime import timedelta
+
+async def client_example():
+    # Initialize keys and client
+    keys = Keys.generate()
+    signer = NostrSigner.keys(keys)
+    client = Client(signer)
+    
+    # Add relays and connect
+    await client.add_relay("wss://relay.damus.io")
+    await client.add_relay("wss://nos.lol")
+    await client.connect()
+    
+    # Send a text note
+    note_builder = EventBuilder.text_note("Hello from rust-nostr Python bindings!")
+    note_output = await client.send_event_builder(note_builder)
+    print(f"Note sent: {note_output.id.to_bech32()}")
+    
+    # Create and send metadata
+    metadata = Metadata().set_name("Test User").set_display_name("Tester").set_about("Testing Nostr")
+    await client.set_metadata(metadata)
+    
+    # Fetch events with a filter
+    filter = Filter().authors([keys.public_key()]).kinds([Kind(0), Kind(1)])
+    events = await client.fetch_events([filter], timedelta(seconds=10))
+    
+    for event in events.to_vec():
+        print(event.as_json())
+
+if __name__ == '__main__':
+    asyncio.run(client_example())
+```
+
+### Client with Options
+
+```python
+import asyncio
+from nostr_sdk import Keys, ClientBuilder, Options, EventBuilder, Connection, ConnectionTarget
+from nostr_sdk import LogLevel, init_logger
+
+async def client_with_options():
+    # Initialize logger
+    init_logger(LogLevel.INFO)
+    
+    # Configure client with proxy for onion relays
+    connection = Connection().addr("127.0.0.1:9050").target(ConnectionTarget.ONION)
+    opts = Options().connection(connection)
+    
+    # Build client with options
+    client = ClientBuilder().opts(opts).build()
+    
+    # Connect to relays including .onion ones
+    await client.add_relay("wss://relay.damus.io")
+    await client.add_relay("ws://oxtrdevav64z64yb7x6rjg4ntzqjhedm5b5zjqulugknhzr46ny2qbad.onion")
+    await client.connect()
+    
+    # Create and sign an event
+    keys = Keys.generate()
+    event = EventBuilder.text_note("Hello from rust-nostr Python bindings!").sign_with_keys(keys)
+    
+    # Send the event
+    output = await client.send_event(event)
+    print(f"Event sent: {output.id.to_bech32()}")
+
+if __name__ == '__main__':
+    asyncio.run(client_with_options())
+```
+
+### Monitoring Relays
+
+```python
+import asyncio
+from nostr_sdk import Client
+
+async def monitor_relays():
+    client = Client()
+    
+    await client.add_relay("wss://relay.damus.io")
+    await client.add_relay("wss://nostr.wine")
+    await client.add_relay("wss://relay.nostr.info")
+    await client.connect()
+    
+    # Get and print relay statistics
+    relays = await client.relays()
+    for url, relay in relays.items():
+        stats = relay.stats()
+        print(f"Relay: {url}")
+        print(f"Connected: {relay.is_connected()}")
+        print(f"Status: {relay.status()}")
+        print("Stats:")
+        print(f"    Attempts: {stats.attempts()}")
+        print(f"    Success: {stats.success()}")
+        print(f"    Bytes sent: {stats.bytes_sent()}")
+        print(f"    Bytes received: {stats.bytes_received()}")
+        print(f"    Connected at: {stats.connected_at().to_human_datetime()}")
+        
+        latency = stats.latency()
+        if latency is not None:
+            print(f"    Latency: {latency.total_seconds() * 1000} ms")
+
+if __name__ == '__main__':
+    asyncio.run(monitor_relays())
+```
+
+### Handling Events with Notifications
+
+```python
+import asyncio
+from nostr_sdk import Client, Keys, Event, Filter, HandleNotification, Timestamp
+from nostr_sdk import init_logger, LogLevel, Kind, KindStandard, NostrSigner
+
+async def handle_notifications():
+    init_logger(LogLevel.DEBUG)
+    
+    keys = Keys.parse("nsec1ufnus6pju578ste3v90xd5m2decpuzpql2295m3sknqcjzyys9ls0qlc85")
+    pk = keys.public_key()
+    print(f"Bot public key: {pk.to_bech32()}")
+    
+    signer = NostrSigner.keys(keys)
+    client = Client(signer)
+    
+    await client.add_relay("wss://relay.damus.io")
+    await client.connect()
+    
+    now = Timestamp.now()
+    
+    # Subscribe to events (filter can be customized)
+    filter = Filter().pubkey(pk).kind(Kind(1)).limit(0)
+    await client.subscribe([filter], None)
+    
+    class NotificationHandler(HandleNotification):
+        async def handle(self, relay_url, subscription_id, event: Event):
+            print(f"Received new event from {relay_url}: {event.as_json()}")
+            
+            # Process different kinds of events
+            if event.kind().as_u16() == 1:  # Text note
+                print(f"Got note: {event.content()}")
+                # Reply example
+                if event.created_at().as_secs() >= now.as_secs():
+                    reply = EventBuilder.text_note(f"Thanks for your message: {event.content()}")
+                    reply.tags([Tag.event(event.id()), Tag.public_key(event.author())])
+                    await client.send_event_builder(reply)
+        
+        async def handle_msg(self, relay_url, msg):
+            # Handle raw relay messages if needed
+            pass
+    
+    # Start handling notifications
+    await client.handle_notifications(NotificationHandler())
+    
+    # For continuous operation in a real app, you might add:
+    # while True:
+    #     await asyncio.sleep(5)
+
+if __name__ == '__main__':
+    asyncio.run(handle_notifications())
+```
+
+### Using Databases
+
+```python
+import asyncio
+from nostr_sdk import Keys, NostrDatabase, ClientBuilder, Filter, init_logger, LogLevel
+
+async def database_example():
+    init_logger(LogLevel.INFO)
+    
+    keys = Keys.parse("nsec1ufnus6pju578ste3v90xd5m2decpuzpql2295m3sknqcjzyys9ls0qlc85")
+    print(keys.public_key().to_bech32())
+    
+    # Create/open LMDB database
+    database = NostrDatabase.lmdb("nostr-lmdb")
+    
+    # Build client with database
+    client = ClientBuilder().database(database).build()
+    
+    await client.add_relay("wss://relay.damus.io")
+    await client.connect()
+    
+    # Sync events with database
+    f = Filter().author(keys.public_key())
+    opts = SyncOptions()
+    await client.sync(f, opts)
+    
+    # Query events from database
+    f = Filter().author(keys.public_key()).limit(10)
+    events = await client.database().query([f])
+    for event in events.to_vec():
+        print(event.as_json())
+
+if __name__ == '__main__':
+    asyncio.run(database_example())
+```
+
+## Common NIPs Implementation
+
+### NIP-01: Metadata (Kind 0)
+
+```python
+from nostr_sdk import Keys, Metadata, EventBuilder
+
+# Create metadata
+metadata = Metadata()\
+    .set_name("TestName")\
+    .set_display_name("DisplayName")\
+    .set_about("About me")\
+    .set_website("https://example.com/")\
+    .set_picture("https://example.com/avatar.jpg")\
+    .set_banner("https://example.com/banner.jpg")\
+    .set_nip05("user@example.com")
+
+# Build metadata event
+builder = EventBuilder.metadata(metadata)
+keys = Keys.generate()
+event = builder.sign_with_keys(keys)
+
+# Deserialize metadata
+metadata_from_event = Metadata().from_json(event.content())
+print(f"Name: {metadata_from_event.get_name()}")
+print(f"Display name: {metadata_from_event.get_display_name()}")
+print(f"About: {metadata_from_event.get_about()}")
+```
+
+### NIP-05: DNS Verification
+
+```python
+import asyncio
+from nostr_sdk import Metadata, PublicKey, verify_nip05, get_nip05_profile
+
+async def nip05_example():
+    # Create metadata with NIP-05
+    metadata = Metadata() \
+        .set_name("username") \
+        .set_nip05("username@example.com")
+    
+    # Verify NIP-05
+    nip_05 = "yuki@yukikishimoto.com"
+    public_key = PublicKey.parse("npub1drvpzev3syqt0kjrls50050uzf25gehpz9vgdw08hvex7e0vgfeq0eseet")
+    proxy = None
+    
+    if await verify_nip05(public_key, nip_05, proxy):
+        print(f"'{nip_05}' verified for {public_key.to_bech32()}")
+    else:
+        print(f"Unable to verify NIP-05 for {public_key.to_bech32()}")
+    
+    # Get profile from NIP-05
+    profile = await get_nip05_profile(nip_05)
+    print(f"{nip_05} Public key: {profile.public_key().to_bech32()}")
+
+if __name__ == '__main__':
+   asyncio.run(nip05_example())
+```
+
+### NIP-19: Human-readable IDs (bech32)
+
+```python
+from nostr_sdk import Keys, EventBuilder, Nip19Profile, Nip19, Nip19Event, Coordinate, Kind, Nip19Coordinate
+
+# Generate keys for examples
+keys = Keys.generate()
+event = EventBuilder.text_note("Hello from rust-nostr Python bindings!").sign_with_keys(keys)
+
+# Basic bech32 encodings
+print(f"Public key: {keys.public_key().to_bech32()}")  # npub
+print(f"Secret key: {keys.secret_key().to_bech32()}")  # nsec
+print(f"Event ID: {event.id().to_bech32()}")  # note
+
+# NIP-19 profiles (nprofile)
+relays = ["wss://relay.damus.io"]
+nprofile = Nip19Profile(keys.public_key(), relays)
+print(f"Profile (bech32): {nprofile.to_bech32()}")
+
+# Decode NIP-19 profile
+decode_nprofile = Nip19.from_bech32(nprofile.to_bech32())
+print(f"Decoded profile: {decode_nprofile}")
+
+# NIP-19 events (nevent)
+nevent = Nip19Event(event.id(), keys.public_key(), kind=None, relays=relays)
+print(f"Event (bech32): {nevent.to_bech32()}")
+
+# Decode NIP-19 event
+decode_nevent = Nip19.from_bech32(nevent.to_bech32())
+print(f"Decoded event: {decode_nevent}")
+
+# NIP-19 coordinate (naddr)
+coord = Coordinate(Kind(0), keys.public_key())
+coordinate = Nip19Coordinate(coord, [])
+print(f"Coordinate (bech32): {coordinate.to_bech32()}")
+
+# Decode NIP-19 coordinate
+decode_coord = Nip19.from_bech32(coordinate.to_bech32())
+print(f"Decoded coordinate: {decode_coord}")
+```
+
+### NIP-21: Nostr URI scheme
+
+```python
+from nostr_sdk import Keys, PublicKey, EventBuilder, EventId, Nip21, Nip19Profile, Nip19Event, Kind, Coordinate, Nip19Coordinate
+
+# Generate keys for examples
+keys = Keys.generate()
+event = EventBuilder.text_note("Hello from rust-nostr Python bindings!").sign_with_keys(keys)
+
+# Public key URI
+pk_uri = keys.public_key().to_nostr_uri()
+print(f"Public key URI: {pk_uri}")  # nostr:npub...
+
+# Parse public key URI
+pk_parse = Nip21.parse(pk_uri)
+if pk_parse.as_enum().is_pubkey():
+    pk_bech32 = PublicKey.parse(pk_uri).to_bech32()
+    print(f"Public key (bech32): {pk_bech32}")
+
+# Event URI
+note_uri = event.id().to_nostr_uri()
+print(f"Event URI: {note_uri}")  # nostr:note...
+
+# Parse event URI
+note_parse = Nip21.parse(note_uri)
+if note_parse.as_enum().is_note():
+    event_bech32 = EventId.parse(note_uri).to_bech32()
+    print(f"Event (bech32): {event_bech32}")
+
+# Profile URI
+relays = ["wss://relay.damus.io"]
+nprofile = Nip19Profile(keys.public_key(), relays)
+nprofile_uri = nprofile.to_nostr_uri()
+print(f"Profile URI: {nprofile_uri}")  # nostr:nprofile...
+
+# Event with metadata URI
+nevent = Nip19Event(event.id(), keys.public_key(), kind=None, relays=relays)
+nevent_uri = nevent.to_nostr_uri()
+print(f"Event with metadata URI: {nevent_uri}")  # nostr:nevent...
+
+# Coordinate URI
+coord = Coordinate(Kind(0), keys.public_key())
+coordinate = Nip19Coordinate(coord, ["wss://relay.damus.io"])
+coord_uri = coordinate.to_nostr_uri()
+print(f"Coordinate URI: {coord_uri}")  # nostr:naddr...
+```
+
+### NIP-44: Encrypted Messages
+
+```python
+from nostr_sdk import Keys, PublicKey, nip44_encrypt, nip44_decrypt, Nip44Version
+
+# Encrypt and decrypt messages using NIP-44
+keys = Keys.generate()
+target_pk = PublicKey.parse("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+
+# Encrypt a message
+ciphertext = nip44_encrypt(keys.secret_key(), target_pk, "my secret message", Nip44Version.V2)
+print(f"Encrypted: {ciphertext}")
+
+# Decrypt a message
+plaintext = nip44_decrypt(keys.secret_key(), target_pk, ciphertext)
+print(f"Decrypted: {plaintext}")
+```
+
+### NIP-57: Zaps (Lightning Payments)
+
+```python
+from nostr_sdk import Keys, Event, ZapRequestData, PublicKey, SecretKey, EventBuilder, nip57_anonymous_zap_request, nip57_private_zap_request, nip57_decrypt_private_zap_message
+
+# Set up sender keys
+secret_key = SecretKey.parse("6b911fd37cdf5c81d4c0adb1ab7fa822ed253ab0ad9aa18d77257c88b29b718e")
+keys = Keys(secret_key)
+
+# Set up recipient public key and relays
+public_key = PublicKey.parse("npub14f8usejl26twx0dhuxjh9cas7keav9vr0v8nvtwtrjqx3vycc76qqh9nsy")
+relays = ["wss://relay.damus.io"]
+msg = "Zap!"
+data = ZapRequestData(public_key, relays).message(msg)
+
+# Create various types of zap requests
+public_zap = EventBuilder.public_zap_request(data).sign_with_keys(keys)
+print(f"Public zap request: {public_zap.as_json()}")
+
+anon_zap = nip57_anonymous_zap_request(data)
+print(f"Anonymous zap request: {anon_zap.as_json()}")
+
+private_zap = nip57_private_zap_request(data, keys)
+print(f"Private zap request: {private_zap.as_json()}")
+
+# Decode private zap message
+event_msg = nip57_decrypt_private_zap_message(secret_key, public_key, private_zap)
+print(f"Private zap msg: {event_msg.content()}")
+```
+
+### NIP-59: Gift Wrap (Private Routing)
+
+```python
+import asyncio
+from nostr_sdk import Keys, EventBuilder, Event, gift_wrap, UnwrappedGift, UnsignedEvent, NostrSigner
+
+async def nip59_example():
+    # Sender Keys
+    alice_keys = Keys.parse("5c0c523f52a5b6fad39ed2403092df8cebc36318b39383bca6c00808626fab3a")
+    alice_signer = NostrSigner.keys(alice_keys)
+
+    # Receiver Keys
+    bob_keys = Keys.parse("nsec1j4c6269y9w0q2er2xjw8sv2ehyrtfxq3jwgdlxj6qfn8z4gjsq5qfvfk99")
+    bob_signer = NostrSigner.keys(bob_keys)
+
+    # Compose rumor (unsigned event)
+    rumor = EventBuilder.text_note("Secret message").build(alice_keys.public_key())
+
+    # Build gift wrap with sender keys
+    gw = await gift_wrap(alice_signer, bob_keys.public_key(), rumor)
+    print(f"Gift Wrap: {gw.as_json()}")
+
+    # Extract rumor from gift wrap with receiver keys
+    unwrapped_gift = await UnwrappedGift.from_gift_wrap(bob_signer, gw)
+    sender = unwrapped_gift.sender()
+    unwrapped_rumor = unwrapped_gift.rumor()
+    print(f"Sender: {sender.to_bech32()}")
+    print(f"Rumor: {unwrapped_rumor.as_json()}")
+
+if __name__ == '__main__':
+    asyncio.run(nip59_example())
+```
+
+### NIP-65: Relay List Metadata
+
+```python
+from nostr_sdk import EventBuilder, Tag, Kind, Keys, RelayMetadata
+
+# Get Keys
+keys = Keys.generate()
+
+# Create relay dictionary
+relays_dict = {
+    "wss://relay.damus.io": RelayMetadata.READ,
+    "wss://relay.primal.net": RelayMetadata.WRITE,
+    "wss://relay.nostr.band": None  # Both read and write
+}
+
+# Build/sign event
+builder = EventBuilder.relay_list(relays_dict)
+event = builder.sign_with_keys(keys)
+print(f"Relay list event: {event.as_json()}")
+
+# Alternative approach with custom tags
+tag1 = Tag.relay_metadata("wss://relay.damus.io", RelayMetadata.READ)
+tag2 = Tag.relay_metadata("wss://relay.primal.net", RelayMetadata.WRITE)
+tag3 = Tag.relay_metadata("wss://relay.nostr.band", None)
+
+kind = Kind(10002)
+builder = EventBuilder(kind=kind, content="").tags([tag1, tag2, tag3])
+event = builder.sign_with_keys(keys)
+print(f"Custom relay list event: {event.as_json()}")
+```
+
+### NIP-94: File Metadata
+
+```python
+import asyncio
+from nostr_sdk import Keys, Client, FileMetadata, EventBuilder
+
+async def nip94_example():
+    # Create keys and client
+    keys = Keys.generate()
+    client = Client(keys)
+    
+    await client.add_relay("wss://relay.damus.io")
+    await client.connect()
+    
+    # Create file metadata
+    metadata = FileMetadata(
+        "https://github.com/example/project/archive/refs/tags/v1.0.0.zip",
+        "application/zip",
+        "3951c152d38317e9ef2c095ddb280613e22b14b166f5fa5950d18773ac0a1d00"  # SHA-256 hash
+    )
+    
+    # Create and send file metadata event
+    builder = EventBuilder.file_metadata("Project Release v1.0.0", metadata)
+    output = await client.send_event_builder(builder)
+    
+    print("File metadata event sent:")
+    print(f" ID (hex): {output.id.to_hex()}")
+    print(f" ID (bech32): {output.id.to_bech32()}")
+
+if __name__ == '__main__':
+    asyncio.run(nip94_example())
+```
+
+### NIP-98: HTTP Auth
+
+```python
+from nostr_sdk import Keys, EventBuilder, Kind, Tag, Timestamp
+import hashlib
+
+# Generate authentication event for HTTP request
+def create_auth_event(url, method, payload=None, keys=None):
+    if keys is None:
+        keys = Keys.generate()
+    
+    # Create tags
+    tags = [
+        Tag.parse(["u", url]),
+        Tag.parse(["method", method])
+    ]
+    
+    # Add payload hash if provided
+    if payload:
+        payload_hash = hashlib.sha256(payload.encode()).hexdigest()
+        tags.append(Tag.parse(["payload", payload_hash]))
+    
+    # Create and sign auth event
+    event = EventBuilder(Kind(27235), "").tags(tags).sign_with_keys(keys)
+    
+    # In a real app, you would base64 encode this for the Authorization header
+    return event
+
+# Example usage
+keys = Keys.generate()
+auth_event = create_auth_event("https://api.example.com/endpoint", "POST", '{"action":"create"}', keys)
+print(f"Auth event: {auth_event.as_json()}")
+```
+
+## Advanced Features
+
+### Whitelisting and Blacklisting
+
+```python
+import asyncio
+from nostr_sdk import PublicKey, ClientBuilder, Filter, Kind, init_logger, LogLevel, AdmitPolicy, AdmitStatus, Event, uniffi_set_event_loop
+from datetime import timedelta
+
+# Whitelist example
+class WoT(AdmitPolicy):
+    def __init__(self):
+        self.allowed_public_keys = set()
+
+    def allow(self, pk: PublicKey):
+        self.allowed_public_keys.add(pk)
+
+    async def admit_event(self, relay_url: str, subscription_id: str, event: Event) -> AdmitStatus:
+        if event.author() in self.allowed_public_keys:
+            return AdmitStatus.SUCCESS
+        else:
+            return AdmitStatus.REJECTED
+
+# Blacklist example
+class Filtering(AdmitPolicy):
+    def __init__(self):
+        self.muted_public_keys = set()
+
+    def mute(self, pk: PublicKey):
+        self.muted_public_keys.add(pk)
+
+    async def admit_event(self, relay_url: str, subscription_id: str, event: Event) -> AdmitStatus:
+        if event.author() in self.muted_public_keys:
+            return AdmitStatus.REJECTED
+        else:
+            return AdmitStatus.SUCCESS
+
+async def filtering_example():
+    uniffi_set_event_loop(asyncio.get_running_loop())
+    init_logger(LogLevel.INFO)
+    
+    # Set up pubkeys
+    key1 = PublicKey.parse("npub1l2vyh47mk2p0qlsku7hg0vn29faehy9hy34ygaclpn66ukqp3afqutajft")
+    key2 = PublicKey.parse("npub1xtscya34g58tk0z605fvr788k263gsu6cy9x0mhnm87echrgufzsevkk5s")
+    
+    # Whitelist example
+    wot = WoT()
+    wot.allow(key1)
+    
+    whitelist_client = ClientBuilder().admit_policy(wot).build()
+    await whitelist_client.add_relay("wss://relay.damus.io")
+    await whitelist_client.connect()
+    
+    # Get events - should only return events from whitelisted key
+    filter = Filter().authors([key1, key2]).kind(Kind(0))
+    events = await whitelist_client.fetch_events(filter, timedelta(seconds=10))
+    print(f"Whitelisted: Received {events.len()} events")
+    
+    # Blacklist example
+    filtering = Filtering()
+    filtering.mute(key1)
+    
+    blacklist_client = ClientBuilder().admit_policy(filtering).build()
+    await blacklist_client.add_relay("wss://relay.damus.io")
+    await blacklist_client.connect()
+    
+    # Get events - should only return events from non-blacklisted key
+    events = await blacklist_client.fetch_events(filter, timedelta(seconds=10))
+    print(f"Blacklisted: Received {events.len()} events")
+
+if __name__ == '__main__':
+    asyncio.run(filtering_example())
+```
+
+### Relay Limits
+
+```python
+from nostr_sdk import ClientBuilder, Options, RelayLimits
+
+# Set custom relay limits
+limits = RelayLimits().event_max_size(128000)  # 128 KB
+
+# Or disable all limits
+no_limits = RelayLimits.disable()
+
+# Apply limits to options
+opts = Options().relay_limits(limits)
+client = ClientBuilder().opts(opts).build()
+
+# Use the client as normal
+# ...
+```
+
+### Timestamps
+
+```python
+from nostr_sdk import Timestamp, EventBuilder, Keys, Kind, gift_wrap, Tag
+
+# Current timestamp
+timestamp_now = Timestamp.now()
+print(f"Timestamp (human-readable): {timestamp_now.to_human_datetime()}")
+print(f"Timestamp (seconds): {timestamp_now.as_secs()}")
+
+# Parse timestamp from seconds
+timestamp_from_secs = Timestamp.from_secs(1718737479)
+print(f"Parsed timestamp: {timestamp_from_secs.to_human_datetime()}")
+
+# Create event with custom timestamp
+keys = Keys.generate()
+event = EventBuilder(Kind(1), "This is some event text.").custom_created_at(timestamp_from_secs).sign_with_keys(keys)
+print(f"Event created at: {event.created_at().to_human_datetime()}")
+
+# Timestamp in a tag (e.g. expiration)
+tag = Tag.expiration(timestamp_from_secs)
+print(f"Expiration tag: {tag.as_standardized()}")
+```
+
+### Custom WebSocket Transport
+
+The following example shows how to implement a custom WebSocket client, which can be useful for advanced use cases:
+
+```python
+import asyncio
+from aiohttp import ClientSession, ClientWebSocketResponse, WSMsgType
+from nostr_sdk import WebSocketAdapter, WebSocketAdapterWrapper, WebSocketMessage, CustomWebSocketTransport
+from nostr_sdk import ClientBuilder, Keys, EventBuilder, uniffi_set_event_loop, init_logger, LogLevel, NostrSigner
+from datetime import timedelta, datetime
+
+class MyAdapter(WebSocketAdapter):
+    def __init__(self, session: ClientSession, ws: ClientWebSocketResponse):
+        self.session = session
+        self.websocket = ws
+
+    async def send(self, msg: WebSocketMessage):
+        try:
+            if msg.is_text():
+                await self.websocket.send_str(msg[0])
+            elif msg.is_binary():
+                await self.websocket.send_bytes(msg[0])
+        except Exception as e:
+            print(f"Attempted to send on a closed WebSocket: {e}")
+            raise e
+
+    async def recv(self) -> WebSocketMessage | None:
+        try:
+            # Receive message
+            raw_msg = await self.websocket.receive()
+
+            if raw_msg.type == WSMsgType.TEXT:
+                return WebSocketMessage.TEXT(raw_msg.data)
+            elif raw_msg.type == WSMsgType.BINARY:
+                return WebSocketMessage.BINARY(raw_msg.data)
+            elif raw_msg.type == WSMsgType.PING:
+                return WebSocketMessage.PING(raw_msg.data)
+            elif raw_msg.type == WSMsgType.PONG:
+                return WebSocketMessage.PONG(raw_msg.data)
+            else:
+                raise "unknown message type"
+        except Exception as e:
+            raise e
+
+    async def close_connection(self):
+        await self.websocket.close()
+        await self.session.close()
+
+class MyWebSocketClient(CustomWebSocketTransport):
+    def support_ping(self) -> bool:
+        return False
+
+    async def connect(self, url: "str", mode, timeout) -> WebSocketAdapterWrapper:
+        try:
+            session = ClientSession()
+            ws = await session.ws_connect(url)
+
+            adaptor = MyAdapter(session, ws)
+            wrapper = WebSocketAdapterWrapper(adaptor)
+
+            return wrapper
+        except Exception as e:
+            raise e
+
+async def custom_websocket_example():
+    uniffi_set_event_loop(asyncio.get_running_loop())
+    init_logger(LogLevel.TRACE)
+    
+    # Create keys and signer
+    keys = Keys.generate()
+    signer = NostrSigner.keys(keys)
+    
+    # Build client with custom WebSocket transport
+    client = ClientBuilder().signer(signer).websocket_transport(MyWebSocketClient()).build()
+    
+    # Connect to relay
+    await client.add_relay("wss://relay.damus.io")
+    await client.connect()
+    
+    # Send a message
+    builder = EventBuilder.text_note("Testing custom WebSocket transport")
+    output = await client.send_event_builder(builder)
+    
+    print(f"Event sent: {output.id.to_bech32()}")
+    print(f"Successfully sent to: {output.success}")
+    print(f"Failed to send to: {output.failed}")
+    
+    # Fetch events
+    filter = Filter().authors([keys.public_key()])
+    events = await client.fetch_events([filter], timedelta(seconds=10))
+    for event in events.to_vec():
+        print(event.as_pretty_json())
+
+if __name__ == '__main__':
+    asyncio.run(custom_websocket_example())
+```
+
+## Practical Examples
+
+### Create a Simple Nostr Client
+
+```python
+import asyncio
+from nostr_sdk import Keys, Client, EventBuilder, Filter, Kind, Timestamp, Metadata, NostrSigner
+from datetime import timedelta
+
+class SimpleNostrClient:
+    def __init__(self, private_key=None):
+        if private_key:
+            self.keys = Keys.parse(private_key)
+        else:
+            self.keys = Keys.generate()
+            print(f"Generated new keys. Save your private key: {self.keys.secret_key().to_bech32()}")
+            
+        self.signer = NostrSigner.keys(self.keys)
+        self.client = Client(self.signer)
+        self.relays = []
+        
+    async def add_relays(self, relay_urls):
+        for url in relay_urls:
+            await self.client.add_relay(url)
+            self.relays.append(url)
+        await self.client.connect()
+        print(f"Connected to {len(self.relays)} relays")
+        
+    async def setup_profile(self, name, about=None, picture=None):
+        metadata = Metadata().set_name(name)
+        if about:
+            metadata.set_about(about)
+        if picture:
+            metadata.set_picture(picture)
+            
+        await self.client.set_metadata(metadata)
+        print(f"Profile updated for {name}")
+    
+    async def publish_note(self, content):
+        builder = EventBuilder.text_note(content)
+        output = await self.client.send_event_builder(builder)
+        print(f"Note published with ID: {output.id.to_bech32()}")
+        return output.id
+        
+    async def get_recent_notes(self, limit=20):
+        filter = Filter().kinds([Kind(1)]).limit(limit)
+        events = await self.client.fetch_events([filter], timedelta(seconds=10))
+        
+        notes = []
+        for event in events.to_vec():
+            author_hex = event.author().to_hex()
+            author_bech32 = event.author().to_bech32()
+            created_at = event.created_at().to_human_datetime()
+            content = event.content()
+            
+            notes.append({
+                "id": event.id().to_bech32(),
+                "author": {
+                    "hex": author_hex,
+                    "bech32": author_bech32
+                },
+                "created_at": created_at,
+                "content": content
+            })
+            
+        return notes
+        
+    async def get_user_profile(self, pubkey):
+        if isinstance(pubkey, str) and pubkey.startswith("npub"):
+            pubkey = PublicKey.parse(pubkey)
+            
+        filter = Filter().authors([pubkey]).kinds([Kind(0)]).limit(1)
+        events = await self.client.fetch_events([filter], timedelta(seconds=10))
+        
+        if events.len() > 0:
+            event = events.to_vec()[0]
+            metadata = Metadata.from_json(event.content())
+            
+            profile = {
+                "name": metadata.get_name(),
+                "display_name": metadata.get_display_name(),
+                "about": metadata.get_about(),
+                "picture": metadata.get_picture(),
+                "nip05": metadata.get_nip05()
+            }
+            
+            return profile
+        
+        return None
+
+# Example usage
+async def main():
+    # Create client with new keys or restore from existing key
+    client = SimpleNostrClient()  # Or SimpleNostrClient("nsec1...")
+    
+    # Connect to relays
+    await client.add_relays(["wss://relay.damus.io", "wss://nos.lol", "wss://relay.nostr.band"])
+    
+    # Setup profile
+    await client.setup_profile("NostrTester", "Testing the Nostr protocol", "https://example.com/avatar.jpg")
+    
+    # Publish a note
+    note_id = await client.publish_note("Hello from my simple Nostr client!")
+    
+    # Get recent notes
+    recent_notes = await client.get_recent_notes(10)
+    for note in recent_notes:
+        print(f"[{note['created_at']}] {note['author']['bech32']}: {note['content']}")
+    
+    # Get a user profile
+    profile = await client.get_user_profile("npub1drvpzev3syqt0kjrls50050uzf25gehpz9vgdw08hvex7e0vgfeq0eseet")
+    if profile:
+        print(f"Profile: {profile['name']} ({profile['display_name']})")
+        print(f"About: {profile['about']}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+### Relay Monitor
+
+```python
+import asyncio
+import time
+from nostr_sdk import Client, init_logger, LogLevel
+
+class RelayMonitor:
+    def __init__(self, relay_urls):
+        self.relay_urls = relay_urls
+        self.client = Client()
+        self.start_time = time.time()
+        
+    async def connect(self):
+        # Add relays
+        for url in self.relay_urls:
+            await self.client.add_relay(url)
+        
+        # Connect to relays
+        await self.client.connect()
+        print(f"Connected to {len(self.relay_urls)} relays")
+        
+    async def monitor(self, interval=10):
+        """Monitor relays at specified interval in seconds"""
+        while True:
+            print("\n" + "="*50)
+            print(f"Relay Status Report ({time.strftime('%Y-%m-%d %H:%M:%S')})")
+            print("="*50)
+            
+            relays = await self.client.relays()
+            for url, relay in relays.items():
+                stats = relay.stats()
+                
+                # Calculate uptime percentage
+                uptime_total = time.time() - self.start_time
+                success_rate = (stats.success() / max(1, stats.attempts())) * 100
+                
+                print(f"\nRelay: {url}")
+                print(f"Connected: {relay.is_connected()}")
+                print(f"Status: {relay.status()}")
+                print("Stats:")
+                print(f"  Attempts: {stats.attempts()}")
+                print(f"  Success: {stats.success()} ({success_rate:.1f}%)")
+                print(f"  Bytes sent: {stats.bytes_sent()} bytes")
+                print(f"  Bytes received: {stats.bytes_received()} bytes")
+                print(f"  Connected at: {stats.connected_at().to_human_datetime()}")
+                
+                latency = stats.latency()
+                if latency is not None:
+                    latency_ms = latency.total_seconds() * 1000
+                    print(f"  Latency: {latency_ms:.2f} ms")
+                else:
+                    print("  Latency: Not available")
+            
+            await asyncio.sleep(interval)
+
+async def main():
+    init_logger(LogLevel.INFO)
+    
+    # List of relays to monitor
+    relays = [
+        "wss://relay.damus.io",
+        "wss://relay.nostr.band",
+        "wss://nos.lol",
+        "wss://nostr.wine"
+    ]
+    
+    monitor = RelayMonitor(relays)
+    await monitor.connect()
+    await monitor.monitor(interval=15)  # Check every 15 seconds
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+### Simple Bot Responder
+
+```python
+import asyncio
+from nostr_sdk import Client, Keys, Event, Filter, HandleNotification
+from nostr_sdk import EventBuilder, Tag, Timestamp, Kind, NostrSigner
+from nostr_sdk import init_logger, LogLevel
+import re
+
+class SimpleBot:
+    def __init__(self, private_key, command_prefix="!"):
+        self.keys = Keys.parse(private_key)
+        self.pubkey = self.keys.public_key()
+        self.signer = NostrSigner.keys(self.keys)
+        self.client = Client(self.signer)
+        self.command_prefix = command_prefix
+        self.commands = {}
+        self.now = Timestamp.now()
+        
+        # Initialize default commands
+        self.register_command("help", self.cmd_help, "Show available commands")
+        self.register_command("echo", self.cmd_echo, "Echo back your message")
+        self.register_command("about", self.cmd_about, "About this bot")
+    
+    def register_command(self, name, handler, description=""):
+        """Register a command handler function"""
+        self.commands[name] = {
+            "handler": handler,
+            "description": description
+        }
+    
+    async def connect(self, relays):
+        """Connect to relays"""
+        for relay in relays:
+            await self.client.add_relay(relay)
+        await self.client.connect()
+        print(f"Bot connected as {self.pubkey.to_bech32()}")
+        
+        # Set up metadata
+        await self.setup_profile()
+    
+    async def setup_profile(self):
+        """Set up bot profile metadata"""
+        metadata = Metadata()\
+            .set_name("Nostr Bot")\
+            .set_display_name("Simple Nostr Bot")\
+            .set_about("I'm a simple bot that responds to commands. Try !help")\
+            .set_picture("https://example.com/bot-avatar.jpg")
+        
+        await self.client.set_metadata(metadata)
+        print("Bot profile updated")
+    
+    async def start(self):
+        """Start listening for mentions and commands"""
+        # Create filter for messages mentioning our pubkey
+        mention_filter = Filter().pubkey(self.pubkey).kinds([Kind(1)]).limit(0)
+        pubkey_filter = Filter().kinds([Kind(1)]).limit(0).referenced_pubkeys([self.pubkey])
+        
+        # Subscribe to filters
+        await self.client.subscribe([mention_filter, pubkey_filter], None)
+        
+        # Set up notification handler
+        await self.client.handle_notifications(self.NotificationHandler(self))
+        
+        print("Bot is now listening for commands")
+        
+        # Keep the bot running
+        while True:
+            await asyncio.sleep(60)
+    
+    class NotificationHandler(HandleNotification):
+        def __init__(self, bot):
+            self.bot = bot
+        
+        async def handle(self, relay_url, subscription_id, event: Event):
+            # Skip old events
+            if event.created_at().as_secs() < self.bot.now.as_secs():
+                return
+                
+            # Check if it's a text note (kind 1)
+            if event.kind().as_std() == KindStandard.TEXT_NOTE:
+                # Process potential command
+                await self.bot.process_event(event, relay_url)
+        
+        async def handle_msg(self, relay_url, msg):
+            # Handle any raw messages if needed
+            pass
+    
+    async def process_event(self, event: Event, relay_url: str):
+        """Process an incoming event for commands"""
+        # Check if our public key is mentioned in tags
+        is_mentioned = False
+        for tag in event.tags().to_vec():
+            if tag.kind().is_pubkey() and tag.as_vec()[1] == self.pubkey.to_hex():
+                is_mentioned = True
+                break
+        
+        # Skip if we're not mentioned and it's not a DM to us
+        if not is_mentioned and self.pubkey.to_hex() not in event.content():
+            return
+            
+        content = event.content()
+        author = event.author()
+        
+        # Look for commands with our prefix
+        command_pattern = f"{self.command_prefix}([a-zA-Z0-9_]+)(?:\\s+(.+)?)?"
+        match = re.search(command_pattern, content)
+        
+        if match:
+            command = match.group(1).lower()
+            args = match.group(2) if match.group(2) else ""
+            
+            print(f"Command received from {author.to_bech32()}: {command} {args}")
+            
+            # Execute command if registered
+            if command in self.commands:
+                response = await self.commands[command]["handler"](args, event)
+                if response:
+                    await self.send_reply(event, response)
+            else:
+                await self.send_reply(event, f"Unknown command: {command}. Try {self.command_prefix}help")
+    
+    async def send_reply(self, event: Event, content: str):
+        """Send a reply to an event"""
+        builder = EventBuilder.text_note(content)
+        builder.tags([
+            Tag.event(event.id(), None, "reply"),  # Reference to the event we're replying to
+            Tag.public_key(event.author())  # Mention the author
+        ])
+        
+        output = await self.client.send_event_builder(builder)
+        print(f"Reply sent: {output.id.to_bech32()}")
+    
+    # Command handlers
+    async def cmd_help(self, args, event):
+        """Help command handler"""
+        help_text = "Available commands:\n\n"
+        for cmd, info in self.commands.items():
+            help_text += f"{self.command_prefix}{cmd}: {info['description']}\n"
+        return help_text
+    
+    async def cmd_echo(self, args, event):
+        """Echo command handler"""
+        if args:
+            return f"Echo: {args}"
+        else:
+            return "You didn't provide anything to echo!"
+    
+    async def cmd_about(self, args, event):
+        """About command handler"""
+        return "I'm a simple Nostr bot built with the rust-nostr Python bindings. My code is running on the latest version of the library."
+
+# Example usage
+async def main():
+    init_logger(LogLevel.INFO)
+    
+    # Initialize bot with your private key
+    bot = SimpleBot("nsec1ufnus6pju578ste3v90xd5m2decpuzpql2295m3sknqcjzyys9ls0qlc85")
+    
+    # Connect to relays
+    await bot.connect(["wss://relay.damus.io", "wss://nos.lol"])
+    
+    # Register additional custom commands
+    bot.register_command("ping", 
+                        lambda args, event: asyncio.create_task(bot.cmd_ping(args, event)), 
+                        "Check if bot is alive")
+    
+    # Start the bot
+    await bot.start()
+
+# Custom command implementation
+async def cmd_ping(self, args, event):
+    return "Pong! I'm alive and responding."
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+## Conclusion
+
+This guide covers the primary functionality offered by the rust-nostr Python bindings. Nostr is a rapidly evolving protocol with new NIPs being developed regularly. For the most current information, refer to the official documentation:
+
+- [Rust-Nostr GitHub Repository](https://github.com/rust-nostr/nostr)
+- [Rust-Nostr Python Bindings](https://github.com/rust-nostr/nostr/tree/master/bindings/nostr-python)
+- [Nostr NIPs Repository](https://github.com/nostr-protocol/nips)
+
+By using the rust-nostr Python bindings, you can leverage the performance and safety of Rust with the flexibility and ease of Python for building powerful Nostr applications.
