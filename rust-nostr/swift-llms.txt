@@ -1,0 +1,1559 @@
+# Rust-Nostr Swift Bindings - Complete Guide
+
+This guide provides comprehensive information for building Nostr applications using the rust-nostr Swift bindings. It's designed as a reference for developers working with the Nostr protocol through these bindings.
+## Introduction to Nostr
+
+Nostr (Notes and Other Stuff Transmitted by Relays) is a simple, open protocol that enables global, decentralized, and censorship-resistant social media. It uses public key cryptography and a network of relays for message distribution.
+
+Core components:
+- **Events**: The basic data structure containing content
+- **Keys**: Public/private key pairs for signing and identity
+- **Relays**: Servers that receive, store, and serve events
+- **Clients**: Applications that interact with relays to publish and fetch events
+
+## Getting Started
+
+### Installation
+
+Add the rust-nostr Swift package to your project:
+
+```swift
+// swift-tools-version: 5.5
+import PackageDescription
+
+let package = Package(
+    name: "YourApp",
+    platforms: [.macOS(.v12)],
+    dependencies: [
+        .package(url: "https://github.com/rust-nostr/nostr-sdk-swift", from: "0.40.0")
+    ],
+    targets: [
+        .executableTarget(
+            name: "YourApp",
+            dependencies: [
+                .product(name: "NostrSDK", package: "nostr-sdk-swift"),
+            ]),
+    ]
+)
+```
+
+### Basic Hello World
+
+```swift
+import Foundation
+import NostrSDK
+
+func hello() async throws {
+    // Generate keys
+    let keys = Keys.generate()
+    let signer = NostrSigner.keys(keys: keys)
+    let client = Client(signer: signer)
+    
+    // Connect to a relay
+    try await client.addRelay(url: "wss://relay.damus.io")
+    await client.connect()
+    
+    // Publish a note
+    let builder = EventBuilder.textNote(content: "Hello, rust-nostr!")
+    let output = try await client.sendEventBuilder(builder: builder)
+    
+    // Print results
+    print("Event ID: \(try output.id.toBech32())")
+    print("Sent to: \(output.success)")
+    print("Not sent to: \(output.failed)")
+}
+```
+
+## Key Management
+
+### Generating and Managing Keys
+
+```swift
+import Foundation
+import NostrSDK
+
+func generate() throws {
+    // Generate new keys
+    let keys = Keys.generate()
+
+    let publicKey = keys.publicKey()
+    let secretKey = keys.secretKey()
+
+    print("Public key (hex): \(publicKey.toHex())")
+    print("Secret key (hex): \(secretKey.toHex())")
+
+    print("Public key (bech32): \(try publicKey.toBech32())")
+    print("Secret key (bech32): \(try secretKey.toBech32())")
+}
+
+func restore() throws {
+    // Restore keys from nsec or hex
+    let keys = try Keys.parse(secretKey: "nsec1j4c6269y9w0q2er2xjw8sv2ehyrtfxq3jwgdlxj6qfn8z4gjsq5qfvfk99")
+
+    let publicKey = keys.publicKey()
+
+    print("Public key: \(try publicKey.toBech32())")
+}
+```
+
+### Using Seed Phrases (NIP-06)
+
+```swift
+import Foundation
+import NostrSDK
+
+func fromMnemonic() throws {
+    // Generate keys from seed phrase
+    let words = "leader monkey parrot ring guide accident before fence cannon height naive bean"
+    let passphrase: String? = nil
+    
+    // Default derivation path
+    let keys = try Keys.fromMnemonic(mnemonic: words, passphrase: passphrase)
+    print("Default account bech32: \(try keys.secretKey().toBech32())")
+    
+    // Multiple accounts from same seed phrase
+    for account in 0..<3 {
+        let accountKeys = try Keys.fromMnemonic(
+            mnemonic: words, 
+            passphrase: passphrase, 
+            account: UInt32(account)
+        )
+        let nsec = try accountKeys.secretKey().toBech32()
+        print("Account #\(account) bech32: \(nsec)")
+    }
+}
+```
+
+### Encrypted Private Keys (NIP-49)
+
+```swift
+import Foundation
+import NostrSDK
+
+func encrypt() throws {
+    // Parse secret key
+    let secretKey = try SecretKey.parse(secretKey: "3501454135014541350145413501453fefb02227e449e57cf4d3a3ce05378683")
+
+    // Encrypt with default settings
+    let password = "nostr"
+    let encrypted = try secretKey.encrypt(password: password)
+    print("Encrypted secret key: \(try encrypted.toBech32())")
+
+    // Custom encryption parameters
+    let encryptedCustom = try EncryptedSecretKey(secretKey: secretKey, password: password, logN: 12, keySecurity: KeySecurity.weak)
+    print("Encrypted secret key (custom): \(try encryptedCustom.toBech32())")
+}
+
+func decrypt() throws {
+    // Parse encrypted key
+    let encrypted = try EncryptedSecretKey.fromBech32(bech32: "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p")
+    
+    // Decrypt
+    let secretKey = try encrypted.decrypt(password: "nostr")
+    print("Decrypted secret key: \(try secretKey.toBech32())")
+}
+```
+
+## Events
+
+Events are the core data structure in Nostr. Each event has a defined kind that specifies its purpose.
+
+### Event Structure
+
+```json
+{
+  "id": "<32-bytes lowercase hex-encoded sha256 of the serialized event data>",
+  "pubkey": "<32-bytes lowercase hex-encoded public key of the event creator>",
+  "created_at": <unix timestamp in seconds>,
+  "kind": <integer between 0 and 65535>,
+  "tags": [
+    ["<tag-identifier>", "<tag-value>", ...],
+    // ...
+  ],
+  "content": "<arbitrary string>",
+  "sig": "<64-bytes lowercase hex of the signature of the sha256 hash of the serialized event data>"
+}
+```
+
+### Creating Events with EventBuilder
+
+```swift
+import NostrSDK
+import Foundation
+
+func signAndPrint(signer: NostrSigner, builder: EventBuilder) async throws {
+    let event = try await builder.sign(signer: signer)
+    print(try event.asJson())
+}
+
+func builder() async throws {
+    let keys = Keys.generate()
+    let signer = NostrSigner.keys(keys: keys)
+    
+    // Standard text note (kind 1)
+    let builder1 = EventBuilder.textNote(content: "Hello")
+    try await signAndPrint(signer: signer, builder: builder1)
+    
+    // Custom event with additional options
+    let tag = Tag.alt(summary: "POW text-note")
+    let timestamp = Timestamp.fromSecs(secs: 1737976769)
+    let builder2 = EventBuilder.textNote(content: "Hello with POW")
+        .tags(tags: [tag])
+        .pow(difficulty: 20)
+        .customCreatedAt(createdAt: timestamp)
+
+    try await signAndPrint(signer: signer, builder: builder2)
+    
+    // Custom kind event
+    let kind = Kind(kind: 33001) // Custom kind
+    let builder3 = EventBuilder(kind: kind, content: "My custom event")
+    try await signAndPrint(signer: signer, builder: builder3)
+}
+```
+
+### Working with Event IDs
+
+```swift
+import NostrSDK
+import Foundation
+
+func workWithEventIds() throws {
+    // Generate keys for examples
+    let keys = Keys.generate()
+    
+    // Create event
+    let event = EventBuilder.textNote(content: "This is a note").signWithKeys(keys: keys)
+    
+    // Get the event ID
+    let eventId = event.id()
+    
+    // Convert formats
+    let eventIdHex = eventId.toHex()
+    let eventIdBech32 = try eventId.toBech32()
+    let eventIdNostrUri = try eventId.toNostrUri()
+    let eventIdBytes = eventId.asBytes()
+    
+    // Parse formats
+    let fromHex = try EventId.parse(id: eventIdHex)
+    let fromBech32 = try EventId.parse(id: eventIdBech32)
+    let fromUri = try EventId.parse(id: eventIdNostrUri)
+    let fromBytes = try EventId.fromBytes(bytes: eventIdBytes)
+    
+    // Verify the event
+    print("Verify the ID & Signature: \(event.verify())")
+}
+```
+
+### Event Kinds
+
+```swift
+import NostrSDK
+import Foundation
+
+func workWithKinds() {
+    // Create kind from integer
+    let kind1 = Kind(kind: 1)  // Text note
+    let kind0 = Kind(kind: 0)  // Metadata
+    let kind3 = Kind(kind: 3)  // Contacts list
+    
+    // Create kind from enum (example syntax, the actual implementation might differ)
+    let kindNote = Kind.fromStd(e: KindStandard.textNote)  // Kind 1
+    let kindMeta = Kind.fromStd(e: KindStandard.metadata)  // Kind 0
+    let kindContacts = Kind.fromStd(e: KindStandard.contactList)  // Kind 3
+    
+    // Testing kind properties
+    let customKind = Kind(kind: 30001)
+    print("Is addressable?: \(customKind.isAddressable())")  // Kinds 30000-39999
+    
+    let kindEphemeral = Kind(kind: 20001)
+    print("Is ephemeral?: \(kindEphemeral.isEphemeral())")  // Kinds 20000-29999
+    
+    let kindReplaceable = Kind(kind: 10001)
+    print("Is replaceable?: \(kindReplaceable.isReplaceable())")  // Kinds 10000-19999
+}
+```
+
+### JSON Serialization
+
+```swift
+import NostrSDK
+import Foundation
+
+func json() throws {
+    let originalJson = "{\"content\":\"uRuvYr585B80L6rSJiHocw==?iv=oh6LVqdsYYol3JfFnXTbPA==\",\"created_at\":1640839235,\"id\":\"2be17aa3031bdcb006f0fce80c146dea9c1c0268b0af2398bb673365c6444d45\",\"kind\":4,\"pubkey\":\"f86c44a2de95d9149b51c6a29afeabba264c18e2fa7c49de93424a0c56947785\",\"sig\":\"a5d9290ef9659083c490b303eb7ee41356d8778ff19f2f91776c8dc4443388a64ffcf336e61af4c25c05ac3ae952d1ced889ed655b67790891222aaa15b99fdd\",\"tags\":[[\"p\",\"13adc511de7e1cfcf1c6b7f6365fb5a03442d7bcacf565ea57fa7770912c023d\"]]}"
+
+    // Deserialize from JSON
+    let event = try Event.fromJson(json: originalJson)
+
+    // Serialize to JSON
+    let json = try event.asJson()
+    
+    // Pretty print
+    print(try event.asPrettyJson())
+}
+```
+
+## Tags
+
+Tags are multi-purpose arrays attached to events that provide additional context and create relationships between events.
+
+### Common Tags
+
+```swift
+import NostrSDK
+import Foundation
+
+func workWithTags() throws {
+    // Generate keys for examples
+    let keys = Keys.generate()
+    let event = EventBuilder.textNote(content: "Hello World!").signWithKeys(keys: keys)
+    
+    // Single Letter Tags
+    let tagEvent = Tag.event(eventId: event.id())  // e tag: reference an event
+    let tagPubkey = Tag.publicKey(publicKey: keys.publicKey())  // p tag: reference a pubkey
+    let tagCoordinate = Tag.coordinate(coordinate: Coordinate(kind: Kind(kind: 0), publicKey: keys.publicKey(), identifier: ""))  // a tag: reference an addressable event
+    let tagIdentifier = Tag.identifier(identifier: "my-identifier")  // d tag: unique identifier
+    let tagRelay = try Tag.relayMetadata(relayUrl: "wss://relay.example.com", metadata: RelayMetadata.read)  // r tag: relay hint
+    let tagHashtag = Tag.hashtag(hashtag: "#nostr")  // t tag: hashtag
+    
+    // Custom Tags
+    let tagSummary = Tag.custom(kind: TagKind.summary, values: ["This is a summary"])
+    let tagAmount = Tag.custom(kind: TagKind.amount, values: ["42"])
+    let tagTitle = Tag.custom(kind: TagKind.title, values: ["This is a title"])
+    let tagSubject = Tag.custom(kind: TagKind.subject, values: ["This is a subject"])
+    let tagDescription = Tag.custom(kind: TagKind.description, values: ["This is a description"])
+    let tagUrl = Tag.custom(kind: TagKind.url, values: ["https://example.com"])
+    
+    // Parse raw tags
+    let tagLabelNs = try Tag.parse(data: ["L", "Label Namespace"])
+    let tagLabelVal = try Tag.parse(data: ["l", "Label Value"])
+    
+    // Access tag properties
+    print("Tag kind: \(tagPubkey.kind())")
+    print("Tag single letter: \(tagPubkey.singleLetterTag())")
+    print("Tag content: \(tagPubkey.content())")
+    print("Tag as standardized: \(tagPubkey.asStandardized())")
+    print("Tag as vector: \(tagPubkey.asVec())")
+}
+```
+
+## Filters
+
+Filters are used to query events from relays.
+
+### Creating Filters
+
+```swift
+import NostrSDK
+import Foundation
+
+func workWithFilters() throws {
+    // Generate keys for examples
+    let keys = Keys.generate()
+    let event = EventBuilder.textNote(content: "Hello World!").signWithKeys(keys: keys)
+    
+    // Filter for specific event ID
+    let filterId = Filter().id(id: event.id())
+    
+    // Filter for specific author
+    let filterAuthor = Filter().author(author: keys.publicKey())
+    
+    // Filter by pubkey and kind
+    let filterPkKind = Filter().pubkey(pubkey: keys.publicKey()).kind(kind: Kind(kind: 1))
+    
+    // Filter by search string
+    let filterSearch = Filter().search(text: "Nostr Protocol")
+    
+    // Filter with timeframe
+    let timestamp = 1231006505 // Bitcoin genesis block timestamp
+    let sinceTs = Timestamp.fromSecs(secs: UInt64(timestamp))
+    let untilTs = Timestamp.now()
+    
+    let filterTimeframe = Filter()
+        .pubkey(pubkey: keys.publicKey())
+        .since(timestamp: sinceTs)
+        .until(timestamp: untilTs)
+    
+    // Limit results
+    let filterLimit = Filter().author(author: keys.publicKey()).limit(limit: 10)
+    
+    // Filter for hashtags
+    let filterHashtags = Filter().hashtags(hashtags: ["#Bitcoin", "#Nostr"])
+    
+    // Filter for references
+    let filterReference = Filter().reference(reference: "My reference")
+    
+    // Modifying filters
+    let publicKeys: [PublicKey] = [keys.publicKey()]
+    let kinds: [Kind] = [Kind(kind: 0), Kind(kind: 1)]
+    let filterMulti = Filter().pubkeys(pubkeys: publicKeys).kinds(kinds: kinds).author(author: keys.publicKey())
+    
+    // Add an additional kind
+    let extraKinds: [Kind] = [Kind(kind: 4)]
+    let updatedFilter = filterMulti.kinds(kinds: extraKinds)
+    
+    // Remove filters
+    let removeKinds: [Kind] = [Kind(kind: 0)]
+    let filterAfterRemove = updatedFilter.removeKinds(kinds: removeKinds)
+    
+    let removePubkeys: [PublicKey] = [keys.publicKey()]
+    let finalFilter = filterAfterRemove.removePublicKeys(pubkeys: removePubkeys)
+    
+    // Testing if an event matches a filter
+    let doesMatch = filterPkKind.matchEvent(event: event)
+}
+```
+
+## Relays and Clients
+
+### Basic Client Usage
+
+```swift
+import Foundation
+import NostrSDK
+
+func clientExample() async throws {
+    // Initialize keys and client
+    let keys = Keys.generate()
+    let signer = NostrSigner.keys(keys: keys)
+    let client = Client(signer: signer)
+    
+    // Add relays and connect
+    try await client.addRelay(url: "wss://relay.damus.io")
+    try await client.addRelay(url: "wss://nos.lol")
+    await client.connect()
+    
+    // Send a text note
+    let noteBuilder = EventBuilder.textNote(content: "Hello from rust-nostr Swift bindings!")
+    let noteOutput = try await client.sendEventBuilder(builder: noteBuilder)
+    print("Note sent: \(try noteOutput.id.toBech32())")
+    
+    // Create and send metadata
+    let metadata = Metadata()
+        .setName(name: "Test User")
+        .setDisplayName(displayName: "Tester")
+        .setAbout(about: "Testing Nostr")
+    
+    try await client.setMetadata(metadata: metadata)
+    
+    // Fetch events with a filter
+    let filter = Filter()
+        .authors(authors: [keys.publicKey()])
+        .kinds(kinds: [Kind(kind: 0), Kind(kind: 1)])
+    
+    let events = try await client.fetchEvents(filter: filter, timeout: 10)
+    
+    let eventArray = try events.toVec()
+    for event in eventArray {
+        print(try event.asJson())
+    }
+}
+```
+
+### Client with Options
+
+```swift
+import Foundation
+import NostrSDK
+
+func clientWithOptions() async throws {
+    // Initialize logger
+    initLogger(level: LogLevel.info)
+    
+    // Configure client with proxy for onion relays
+    let connection = Connection()
+        .addr(addr: "127.0.0.1:9050")
+        .target(target: ConnectionTarget.onion)
+    
+    let opts = Options()
+        .connection(connection: connection)
+    
+    // Build client with options
+    let client = ClientBuilder()
+        .opts(opts: opts)
+        .build()
+    
+    // Connect to relays including .onion ones
+    try await client.addRelay(url: "wss://relay.damus.io")
+    try await client.addRelay(url: "ws://oxtrdevav64z64yb7x6rjg4ntzqjhedm5b5zjqulugknhzr46ny2qbad.onion")
+    await client.connect()
+    
+    // Create and sign an event
+    let keys = Keys.generate()
+    let event = EventBuilder.textNote(content: "Hello from rust-nostr Swift bindings!").signWithKeys(keys: keys)
+    
+    // Send the event
+    let output = try await client.sendEvent(event: event)
+    print("Event sent: \(try output.id.toBech32())")
+}
+```
+
+### Monitoring Relays
+
+```swift
+import Foundation
+import NostrSDK
+
+func monitorRelays() async throws {
+    let client = Client()
+    
+    try await client.addRelay(url: "wss://relay.damus.io")
+    try await client.addRelay(url: "wss://nostr.wine")
+    try await client.addRelay(url: "wss://relay.nostr.info")
+    await client.connect()
+    
+    // Get and print relay statistics
+    let relays = await client.relays()
+    for (url, relay) in relays {
+        let stats = relay.stats()
+        print("Relay: \(url)")
+        print("Connected: \(relay.isConnected())")
+        print("Status: \(relay.status())")
+        print("Stats:")
+        print("    Attempts: \(stats.attempts())")
+        print("    Success: \(stats.success())")
+        print("    Bytes sent: \(stats.bytesSent())")
+        print("    Bytes received: \(stats.bytesReceived())")
+        print("    Connected at: \(stats.connectedAt().toHumanDatetime())")
+        
+        let latency = stats.latency()
+        if let latency = latency {
+            print("    Latency: \(latency.totalSeconds() * 1000) ms")
+        }
+    }
+}
+```
+
+### Handling Events with Notifications
+
+```swift
+import Foundation
+import NostrSDK
+
+class NotificationHandler: HandleNotification {
+    let startTime: Timestamp
+    let client: Client
+    
+    init(client: Client, startTime: Timestamp) {
+        self.client = client
+        self.startTime = startTime
+    }
+    
+    func handle(relayUrl: String, subscriptionId: String, event: Event) async {
+        print("Received new event from \(relayUrl): \(try? event.asJson())")
+        
+        // Process different kinds of events
+        if event.kind().asU16() == 1 {  // Text note
+            print("Got note: \(event.content())")
+            // Reply example
+            if event.createdAt().asSecs() >= startTime.asSecs() {
+                do {
+                    let reply = EventBuilder.textNote(content: "Thanks for your message: \(event.content())")
+                        .tags(tags: [Tag.event(eventId: event.id()), Tag.publicKey(publicKey: event.author())])
+                    try await client.sendEventBuilder(builder: reply)
+                } catch {
+                    print("Error sending reply: \(error)")
+                }
+            }
+        }
+    }
+    
+    func handleMsg(relayUrl: String, msg: RelayMessage) async {
+        // Handle raw relay messages if needed
+    }
+}
+
+func handleNotifications() async throws {
+    initLogger(level: LogLevel.debug)
+    
+    let keys = try Keys.parse(secretKey: "nsec1ufnus6pju578ste3v90xd5m2decpuzpql2295m3sknqcjzyys9ls0qlc85")
+    let pk = keys.publicKey()
+    print("Bot public key: \(try pk.toBech32())")
+    
+    let signer = NostrSigner.keys(keys: keys)
+    let client = Client(signer: signer)
+    
+    try await client.addRelay(url: "wss://relay.damus.io")
+    await client.connect()
+    
+    let now = Timestamp.now()
+    
+    // Subscribe to events (filter can be customized)
+    let filter = Filter().pubkey(pubkey: pk).kind(kind: Kind(kind: 1)).limit(limit: 0)
+    try await client.subscribe(filter: filter, opts: nil)
+    
+    // Start handling notifications
+    let handler = NotificationHandler(client: client, startTime: now)
+    try await client.handleNotifications(handler: handler)
+    
+    // For continuous operation in a real app, you might add:
+    // while true {
+    //     try await Task.sleep(nanoseconds: 5_000_000_000) // 5 seconds
+    // }
+}
+```
+
+### Using Databases
+
+```swift
+import Foundation
+import NostrSDK
+
+func databaseExample() async throws {
+    initLogger(level: LogLevel.info)
+    
+    let keys = try Keys.parse(secretKey: "nsec1ufnus6pju578ste3v90xd5m2decpuzpql2295m3sknqcjzyys9ls0qlc85")
+    print(try keys.publicKey().toBech32())
+    
+    // Create/open LMDB database
+    let database = try NostrDatabase.lmdb(path: "nostr-lmdb")
+    
+    // Build client with database
+    let client = ClientBuilder()
+        .database(database: database)
+        .build()
+    
+    try await client.addRelay(url: "wss://relay.damus.io")
+    await client.connect()
+    
+    // Sync events with database
+    let f = Filter().author(author: keys.publicKey())
+    let opts = SyncOptions()
+    let reconciliation = try await client.sync(filter: f, opts: opts)
+    
+    // Query events from database
+    let queryFilter = Filter().author(author: keys.publicKey()).limit(limit: 10)
+    let events = try await client.database().query(filter: queryFilter)
+    
+    for event in try events.toVec() {
+        print(try event.asJson())
+    }
+}
+```
+
+## Common NIPs Implementation
+
+### NIP-01: Metadata (Kind 0)
+
+```swift
+import Foundation
+import NostrSDK
+
+func metadataExample() throws {
+    // Create metadata
+    let metadata = Metadata()
+        .setName(name: "TestName")
+        .setDisplayName(displayName: "DisplayName")
+        .setAbout(about: "About me")
+        .setWebsite(website: "https://example.com/")
+        .setPicture(picture: "https://example.com/avatar.jpg")
+        .setBanner(banner: "https://example.com/banner.jpg")
+        .setNip05(nip05: "user@example.com")
+    
+    // Build metadata event
+    let builder = EventBuilder.metadata(metadata: metadata)
+    let keys = Keys.generate()
+    let event = builder.signWithKeys(keys: keys)
+    
+    // Deserialize metadata
+    let metadataFromEvent = try Metadata().fromJson(json: event.content())
+    print("Name: \(metadataFromEvent.getName() ?? "None")")
+    print("Display name: \(metadataFromEvent.getDisplayName() ?? "None")")
+    print("About: \(metadataFromEvent.getAbout() ?? "None")")
+}
+```
+
+### NIP-05: DNS Verification
+
+```swift
+import Foundation
+import NostrSDK
+
+func nip05Example() async throws {
+    // Create metadata with NIP-05
+    let metadata = Metadata()
+        .setName(name: "username")
+        .setNip05(nip05: "username@example.com")
+    
+    // Verify NIP-05
+    let nip05 = "yuki@yukikishimoto.com"
+    let publicKey = try PublicKey.parse(publicKey: "npub1drvpzev3syqt0kjrls50050uzf25gehpz9vgdw08hvex7e0vgfeq0eseet")
+    let proxy: String? = nil
+    
+    if try await verifyNip05(publicKey: publicKey, nip05: nip05, proxy: proxy) {
+        print("'\(nip05)' verified for \(try publicKey.toBech32())")
+    } else {
+        print("Unable to verify NIP-05 for \(try publicKey.toBech32())")
+    }
+    
+    // Get profile from NIP-05
+    let profile = try await getNip05Profile(nip05: nip05, proxy: proxy)
+    print("\(nip05) Public key: \(try profile.publicKey().toBech32())")
+}
+```
+
+### NIP-19: Human-readable IDs (bech32)
+
+```swift
+import Foundation
+import NostrSDK
+
+func nip19Example() throws {
+    // Generate keys for examples
+    let keys = Keys.generate()
+    let event = EventBuilder.textNote(content: "Hello from rust-nostr Swift bindings!").signWithKeys(keys: keys)
+    
+    // Basic bech32 encodings
+    print("Public key: \(try keys.publicKey().toBech32())")  // npub
+    print("Secret key: \(try keys.secretKey().toBech32())")  // nsec
+    print("Event ID: \(try event.id().toBech32())")  // note
+    
+    // NIP-19 profiles (nprofile)
+    let relays = ["wss://relay.damus.io"]
+    let nprofile = try Nip19Profile(publicKey: keys.publicKey(), relays: relays)
+    print("Profile (bech32): \(try nprofile.toBech32())")
+    
+    // Decode NIP-19 profile
+    let decodeNprofile = try Nip19.fromBech32(bech32: try nprofile.toBech32())
+    print("Decoded profile: \(decodeNprofile)")
+    
+    // NIP-19 events (nevent)
+    let nevent = Nip19Event(eventId: event.id(), author: keys.publicKey(), kind: nil, relays: relays)
+    print("Event (bech32): \(try nevent.toBech32())")
+    
+    // Decode NIP-19 event
+    let decodeNevent = try Nip19.fromBech32(bech32: try nevent.toBech32())
+    print("Decoded event: \(decodeNevent)")
+    
+    // NIP-19 coordinate (naddr)
+    let coord = Coordinate(kind: Kind(kind: 0), publicKey: keys.publicKey(), identifier: "")
+    let coordinate = try Nip19Coordinate(coordinate: coord, relays: [])
+    print("Coordinate (bech32): \(try coordinate.toBech32())")
+    
+    // Decode NIP-19 coordinate
+    let decodeCoord = try Nip19.fromBech32(bech32: try coordinate.toBech32())
+    print("Decoded coordinate: \(decodeCoord)")
+}
+```
+
+### NIP-21: Nostr URI scheme
+
+```swift
+import Foundation
+import NostrSDK
+
+func nip21Example() throws {
+    // Generate keys for examples
+    let keys = Keys.generate()
+    let event = EventBuilder.textNote(content: "Hello from rust-nostr Swift bindings!").signWithKeys(keys: keys)
+    
+    // Public key URI
+    let pkUri = try keys.publicKey().toNostrUri()
+    print("Public key URI: \(pkUri)")  // nostr:npub...
+    
+    // Parse public key URI
+    let pkParse = try Nip21.parse(uri: pkUri)
+    if let asEnum = pkParse.asEnum(), case .pubkey(let publicKey) = asEnum {
+        let pkBech32 = try PublicKey.parse(publicKey: pkUri).toBech32()
+        print("Public key (bech32): \(pkBech32)")
+    }
+    
+    // Event URI
+    let noteUri = try event.id().toNostrUri()
+    print("Event URI: \(noteUri)")  // nostr:note...
+    
+    // Parse event URI
+    let noteParse = try Nip21.parse(uri: noteUri)
+    if let asEnum = noteParse.asEnum(), case .note(let eventId) = asEnum {
+        let eventBech32 = try EventId.parse(id: noteUri).toBech32()
+        print("Event (bech32): \(eventBech32)")
+    }
+    
+    // Profile URI
+    let relays = ["wss://relay.damus.io"]
+    let nprofile = try Nip19Profile(publicKey: keys.publicKey(), relays: relays)
+    let nprofileUri = try nprofile.toNostrUri()
+    print("Profile URI: \(nprofileUri)")  // nostr:nprofile...
+    
+    // Event with metadata URI
+    let nevent = Nip19Event(eventId: event.id(), author: keys.publicKey(), kind: nil, relays: relays)
+    let neventUri = try nevent.toNostrUri()
+    print("Event with metadata URI: \(neventUri)")  // nostr:nevent...
+    
+    // Coordinate URI
+    let coord = Coordinate(kind: Kind(kind: 0), publicKey: keys.publicKey(), identifier: "")
+    let coordinate = try Nip19Coordinate(coordinate: coord, relays: ["wss://relay.damus.io"])
+    let coordUri = try coordinate.toNostrUri()
+    print("Coordinate URI: \(coordUri)")  // nostr:naddr...
+}
+```
+
+### NIP-44: Encrypted Messages
+
+```swift
+import Foundation
+import NostrSDK
+
+func nip44Example() throws {
+    // Encrypt and decrypt messages using NIP-44
+    let keys = Keys.generate()
+    let targetPk = try PublicKey.parse(publicKey: "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+    
+    // Encrypt a message
+    let ciphertext = try nip44Encrypt(secretKey: keys.secretKey(), publicKey: targetPk, content: "my secret message", version: Nip44Version.v2)
+    print("Encrypted: \(ciphertext)")
+    
+    // Decrypt a message
+    let plaintext = try nip44Decrypt(secretKey: keys.secretKey(), publicKey: targetPk, payload: ciphertext)
+    print("Decrypted: \(plaintext)")
+}
+```
+
+### NIP-57: Zaps (Lightning Payments)
+
+```swift
+import Foundation
+import NostrSDK
+
+func nip57Example() throws {
+    // Set up sender keys
+    let secretKey = try SecretKey.parse(secretKey: "6b911fd37cdf5c81d4c0adb1ab7fa822ed253ab0ad9aa18d77257c88b29b718e")
+    let keys = Keys(secretKey: secretKey)
+    
+    // Set up recipient public key and relays
+    let publicKey = try PublicKey.parse(publicKey: "npub14f8usejl26twx0dhuxjh9cas7keav9vr0v8nvtwtrjqx3vycc76qqh9nsy")
+    let relays = ["wss://relay.damus.io"]
+    let msg = "Zap!"
+    let data = ZapRequestData(publicKey: publicKey, relays: relays).message(message: msg)
+    
+    // Create various types of zap requests
+    let publicZap = EventBuilder.publicZapRequest(data: data).signWithKeys(keys: keys)
+    print("Public zap request: \(try publicZap.asJson())")
+    
+    let anonZap = try nip57_anonymous_zap_request(data: data)
+    print("Anonymous zap request: \(try anonZap.asJson())")
+    
+    let privateZap = try nip57_private_zap_request(data: data, keys: keys)
+    print("Private zap request: \(try privateZap.asJson())")
+    
+    // Decode private zap message
+    let eventMsg = try nip57_decrypt_private_zap_message(secretKey: secretKey, publicKey: publicKey, privateZap: privateZap)
+    print("Private zap msg: \(eventMsg.content())")
+}
+```
+
+### NIP-59: Gift Wrap (Private Routing)
+
+```swift
+import Foundation
+import NostrSDK
+
+func nip59Example() async throws {
+    // Sender Keys
+    let aliceKeys = try Keys.parse(secretKey: "5c0c523f52a5b6fad39ed2403092df8cebc36318b39383bca6c00808626fab3a")
+    let aliceSigner = NostrSigner.keys(keys: aliceKeys)
+    
+    // Receiver Keys
+    let bobKeys = try Keys.parse(secretKey: "nsec1j4c6269y9w0q2er2xjw8sv2ehyrtfxq3jwgdlxj6qfn8z4gjsq5qfvfk99")
+    let bobSigner = NostrSigner.keys(keys: bobKeys)
+    
+    // Compose rumor (unsigned event)
+    let rumor = EventBuilder.textNote(content: "Secret message").build(publicKey: aliceKeys.publicKey())
+    
+    // Build gift wrap with sender keys
+    let gw = try await giftWrap(signer: aliceSigner, receiverPubkey: bobKeys.publicKey(), rumor: rumor, extraTags: [])
+    print("Gift Wrap: \(try gw.asJson())")
+    
+    // Extract rumor from gift wrap with receiver keys
+    let unwrappedGift = try await UnwrappedGift.fromGiftWrap(signer: bobSigner, giftWrap: gw)
+    let sender = unwrappedGift.sender()
+    let unwrappedRumor = unwrappedGift.rumor()
+    print("Sender: \(try sender.toBech32())")
+    print("Rumor: \(try unwrappedRumor.asJson())")
+}
+```
+
+### NIP-65: Relay List Metadata
+
+```swift
+import Foundation
+import NostrSDK
+
+func nip65Example() throws {
+    // Get Keys
+    let keys = Keys.generate()
+    
+    // Create relay dictionary
+    let relaysDict: [String: RelayMetadata?] = [
+        "wss://relay.damus.io": .read,
+        "wss://relay.primal.net": .write,
+        "wss://relay.nostr.band": nil  // Both read and write
+    ]
+    
+    // Build/sign event
+    let builder = EventBuilder.relayList(map: relaysDict)
+    let event = builder.signWithKeys(keys: keys)
+    print("Relay list event: \(try event.asJson())")
+    
+    // Alternative approach with custom tags
+    let tag1 = try Tag.relayMetadata(relayUrl: "wss://relay.damus.io", metadata: RelayMetadata.read)
+    let tag2 = try Tag.relayMetadata(relayUrl: "wss://relay.primal.net", metadata: RelayMetadata.write)
+    let tag3 = try Tag.relayMetadata(relayUrl: "wss://relay.nostr.band", metadata: nil)
+    
+    let kind = Kind(kind: 10002)
+    let builder2 = EventBuilder(kind: kind, content: "").tags(tags: [tag1, tag2, tag3])
+    let event2 = builder2.signWithKeys(keys: keys)
+    print("Custom relay list event: \(try event2.asJson())")
+}
+```
+
+### NIP-94: File Metadata
+
+```swift
+import Foundation
+import NostrSDK
+
+func nip94Example() async throws {
+    // Create keys and client
+    let keys = Keys.generate()
+    let client = Client(signer: NostrSigner.keys(keys: keys))
+    
+    try await client.addRelay(url: "wss://relay.damus.io")
+    await client.connect()
+    
+    // Create file metadata
+    let metadata = try FileMetadata(
+        url: "https://github.com/example/project/archive/refs/tags/v1.0.0.zip",
+        mimeType: "application/zip",
+        hash: "3951c152d38317e9ef2c095ddb280613e22b14b166f5fa5950d18773ac0a1d00"  // SHA-256 hash
+    )
+    
+    // Create and send file metadata event
+    let builder = EventBuilder.fileMetadata(description: "Project Release v1.0.0", metadata: metadata)
+    let output = try await client.sendEventBuilder(builder: builder)
+    
+    print("File metadata event sent:")
+    print(" ID (hex): \(output.id.toHex())")
+    print(" ID (bech32): \(try output.id.toBech32())")
+}
+```
+
+### NIP-98: HTTP Auth
+
+```swift
+import Foundation
+import NostrSDK
+
+// Generate authentication event for HTTP request
+func createAuthEvent(url: String, method: String, payload: String? = nil, keys: Keys? = nil) throws -> Event {
+    let keysToUse = keys ?? Keys.generate()
+    
+    // Create tags
+    var tags: [Tag] = [
+        try Tag.parse(data: ["u", url]),
+        try Tag.parse(data: ["method", method])
+    ]
+    
+    // Add payload hash if provided
+    if let payload = payload {
+        let payloadData = payload.data(using: .utf8)!
+        let payloadHash = SHA256.hash(data: payloadData).hexEncoded
+        tags.append(try Tag.parse(data: ["payload", payloadHash]))
+    }
+    
+    // Create and sign auth event
+    let event = EventBuilder(kind: Kind(kind: 27235), content: "").tags(tags: tags).signWithKeys(keys: keysToUse)
+    
+    // In a real app, you would base64 encode this for the Authorization header
+    return event
+}
+
+// Example usage
+func nip98Example() throws {
+    let keys = Keys.generate()
+    let authEvent = try createAuthEvent(
+        url: "https://api.example.com/endpoint",
+        method: "POST",
+        payload: "{\"action\":\"create\"}",
+        keys: keys
+    )
+    print("Auth event: \(try authEvent.asJson())")
+}
+
+// Helper for SHA256
+struct SHA256 {
+    static func hash(data: Data) -> Data {
+        var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+        data.withUnsafeBytes { buffer in
+            _ = CC_SHA256(buffer.baseAddress, CC_LONG(buffer.count), &digest)
+        }
+        return Data(digest)
+    }
+}
+
+extension Data {
+    var hexEncoded: String {
+        return map { String(format: "%02hhx", $0) }.joined()
+    }
+}
+```
+
+## Advanced Features
+
+### Client with Custom WebSocket Transport
+
+The following example shows how to implement a custom WebSocket client, which can be useful for advanced use cases:
+
+```swift
+import Foundation
+import NostrSDK
+
+class MyWebSocketAdapter: WebSocketAdapter {
+    var websocket: URLSessionWebSocketTask
+    
+    init(websocket: URLSessionWebSocketTask) {
+        self.websocket = websocket
+    }
+    
+    func send(msg: WebSocketMessage) async throws {
+        switch msg {
+        case .text(let text):
+            try await websocket.send(.string(text))
+        case .binary(let data):
+            try await websocket.send(.data(data))
+        case .ping(let data):
+            // URLSessionWebSocketTask handles pings automatically
+            break
+        case .pong(let data):
+            // URLSessionWebSocketTask handles pongs automatically
+            break
+        case .close(let frame):
+            let closeCode = frame.map { $0.code } ?? 1000
+            try await websocket.cancel(with: .normalClosure, reason: frame.map { $0.reason.data(using: .utf8) })
+        }
+    }
+    
+    func recv() async throws -> WebSocketMessage? {
+        do {
+            let result = try await websocket.receive()
+            switch result {
+            case .string(let text):
+                return .text(text)
+            case .data(let data):
+                return .binary([UInt8](data))
+            @unknown default:
+                throw NSError(domain: "WebSocketError", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unknown message type"])
+            }
+        } catch {
+            if let error = error as NSError?, error.domain == "NSURLErrorDomain", error.code == NSURLErrorCancelled {
+                // WebSocket was closed
+                return .close(nil)
+            }
+            throw error
+        }
+    }
+    
+    func closeConnection() async throws {
+        websocket.cancel(with: .normalClosure, reason: nil)
+    }
+}
+
+class MyWebSocketTransport: CustomWebSocketTransport {
+    let session: URLSession
+    
+    init() {
+        self.session = URLSession(configuration: .default)
+    }
+    
+    func supportPing() -> Bool {
+        return true
+    }
+    
+    func connect(url: String, mode: ConnectionMode, timeout: Foundation.Duration) async throws -> WebSocketAdapterWrapper? {
+        guard let urlObj = URL(string: url) else {
+            throw NSError(domain: "WebSocketError", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL"])
+        }
+        
+        let request = URLRequest(url: urlObj, timeoutInterval: TimeInterval(timeout.seconds))
+        let websocket = session.webSocketTask(with: request)
+        websocket.resume()
+        
+        let adapter = MyWebSocketAdapter(websocket: websocket)
+        return WebSocketAdapterWrapper(adapter: adapter)
+    }
+}
+
+func customWebSocketExample() async throws {
+    // Initialize logger
+    initLogger(level: LogLevel.trace)
+    
+    // Create keys and signer
+    let keys = Keys.generate()
+    let signer = NostrSigner.keys(keys: keys)
+    
+    // Build client with custom WebSocket transport
+    let transport = MyWebSocketTransport()
+    let client = ClientBuilder()
+        .signer(signer: signer)
+        .websocketTransport(transport: transport)
+        .build()
+    
+    // Connect to relay
+    try await client.addRelay(url: "wss://relay.damus.io")
+    await client.connect()
+    
+    // Send a message
+    let builder = EventBuilder.textNote(content: "Testing custom WebSocket transport")
+    let output = try await client.sendEventBuilder(builder: builder)
+    
+    print("Event sent: \(try output.id.toBech32())")
+    print("Successfully sent to: \(output.success)")
+    print("Failed to send to: \(output.failed)")
+    
+    // Fetch events
+    let filter = Filter().authors(authors: [keys.publicKey()])
+    let events = try await client.fetchEvents(filter: filter, timeout: 10)
+    for event in try events.toVec() {
+        print(try event.asPrettyJson())
+    }
+}
+```
+
+## Practical Examples
+
+### Create a Simple Nostr Client
+
+```swift
+import Foundation
+import NostrSDK
+
+class SimpleNostrClient {
+    let keys: Keys
+    let signer: NostrSigner
+    let client: Client
+    var relays: [String] = []
+    
+    init(privateKey: String? = nil) throws {
+        if let privateKey = privateKey {
+            self.keys = try Keys.parse(secretKey: privateKey)
+        } else {
+            self.keys = Keys.generate()
+            print("Generated new keys. Save your private key: \(try keys.secretKey().toBech32())")
+        }
+        
+        self.signer = NostrSigner.keys(keys: keys)
+        self.client = Client(signer: signer)
+    }
+    
+    func addRelays(relayUrls: [String]) async throws {
+        for url in relayUrls {
+            try await self.client.addRelay(url: url)
+            self.relays.append(url)
+        }
+        await self.client.connect()
+        print("Connected to \(relays.count) relays")
+    }
+    
+    func setupProfile(name: String, about: String? = nil, picture: String? = nil) async throws {
+        var metadata = Metadata().setName(name: name)
+        
+        if let about = about {
+            metadata = metadata.setAbout(about: about)
+        }
+        
+        if let picture = picture {
+            metadata = try metadata.setPicture(picture: picture)
+        }
+        
+        try await self.client.setMetadata(metadata: metadata)
+        print("Profile updated for \(name)")
+    }
+    
+    func publishNote(content: String) async throws -> EventId {
+        let builder = EventBuilder.textNote(content: content)
+        let output = try await self.client.sendEventBuilder(builder: builder)
+        print("Note published with ID: \(try output.id.toBech32())")
+        return output.id
+    }
+    
+    func getRecentNotes(limit: UInt64 = 20) async throws -> [[String: Any]] {
+        let filter = Filter().kinds(kinds: [Kind(kind: 1)]).limit(limit: limit)
+        let events = try await self.client.fetchEvents(filter: filter, timeout: 10)
+        
+        var notes: [[String: Any]] = []
+        for event in try events.toVec() {
+            let authorHex = event.author().toHex()
+            let authorBech32 = try event.author().toBech32()
+            let createdAt = event.createdAt().toHumanDatetime()
+            let content = event.content()
+            
+            var note: [String: Any] = [
+                "id": try event.id().toBech32(),
+                "author": [
+                    "hex": authorHex,
+                    "bech32": authorBech32
+                ],
+                "created_at": createdAt,
+                "content": content
+            ]
+            
+            notes.append(note)
+        }
+        
+        return notes
+    }
+    
+    func getUserProfile(pubkey: String) async throws -> [String: String?]? {
+        let parsedPubkey: PublicKey
+        if pubkey.starts(with: "npub") {
+            parsedPubkey = try PublicKey.parse(publicKey: pubkey)
+        } else {
+            parsedPubkey = try PublicKey.parse(publicKey: pubkey)
+        }
+        
+        let filter = Filter().authors(authors: [parsedPubkey]).kinds(kinds: [Kind(kind: 0)]).limit(limit: 1)
+        let events = try await self.client.fetchEvents(filter: filter, timeout: 10)
+        
+        if events.len() > 0 {
+            let event = try events.toVec()[0]
+            let metadata = try Metadata.fromJson(json: event.content())
+            
+            let profile: [String: String?] = [
+                "name": metadata.getName(),
+                "display_name": metadata.getDisplayName(),
+                "about": metadata.getAbout(),
+                "picture": metadata.getPicture(),
+                "nip05": metadata.getNip05()
+            ]
+            
+            return profile
+        }
+        
+        return nil
+    }
+}
+
+// Example usage
+func main() async throws {
+    // Create client with new keys or restore from existing key
+    let client = try SimpleNostrClient()  // Or try SimpleNostrClient(privateKey: "nsec1...")
+    
+    // Connect to relays
+    try await client.addRelays(relayUrls: ["wss://relay.damus.io", "wss://nos.lol", "wss://relay.nostr.band"])
+    
+    // Setup profile
+    try await client.setupProfile(
+        name: "NostrTester",
+        about: "Testing the Nostr protocol",
+        picture: "https://example.com/avatar.jpg"
+    )
+    
+    // Publish a note
+    let noteId = try await client.publishNote(content: "Hello from my simple Nostr client!")
+    
+    // Get recent notes
+    let recentNotes = try await client.getRecentNotes(limit: 10)
+    for note in recentNotes {
+        if let author = note["author"] as? [String: String],
+           let createdAt = note["created_at"] as? String,
+           let content = note["content"] as? String {
+            print("[\(createdAt)] \(author["bech32"] ?? "unknown"): \(content)")
+        }
+    }
+    
+    // Get a user profile
+    if let profile = try await client.getUserProfile(pubkey: "npub1drvpzev3syqt0kjrls50050uzf25gehpz9vgdw08hvex7e0vgfeq0eseet") {
+        print("Profile: \(profile["name"] ?? "Unknown") (\(profile["display_name"] ?? "Unknown"))")
+        print("About: \(profile["about"] ?? "None")")
+    }
+}
+```
+
+### Relay Monitor
+
+```swift
+import Foundation
+import NostrSDK
+
+class RelayMonitor {
+    let relayUrls: [String]
+    let client: Client
+    let startTime: Double
+    
+    init(relayUrls: [String]) {
+        self.relayUrls = relayUrls
+        self.client = Client()
+        self.startTime = Date().timeIntervalSince1970
+    }
+    
+    func connect() async throws {
+        // Add relays
+        for url in relayUrls {
+            try await client.addRelay(url: url)
+        }
+        
+        // Connect to relays
+        await client.connect()
+        print("Connected to \(relayUrls.count) relays")
+    }
+    
+    func monitor(interval: UInt64 = 10) async throws {
+        // Monitor relays at specified interval in seconds
+        while true {
+            print("\n" + String(repeating: "=", count: 50))
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+            print("Relay Status Report (\(formatter.string(from: Date())))")
+            print(String(repeating: "=", count: 50))
+            
+            let relays = await client.relays()
+            for (url, relay) in relays {
+                let stats = relay.stats()
+                
+                // Calculate uptime percentage
+                let uptimeTotal = Date().timeIntervalSince1970 - startTime
+                let successRate = (Double(stats.success()) / Double(max(1, stats.attempts()))) * 100
+                
+                print("\nRelay: \(url)")
+                print("Connected: \(relay.isConnected())")
+                print("Status: \(relay.status())")
+                print("Stats:")
+                print("  Attempts: \(stats.attempts())")
+                print("  Success: \(stats.success()) (\(String(format: "%.1f", successRate))%)")
+                print("  Bytes sent: \(stats.bytesSent()) bytes")
+                print("  Bytes received: \(stats.bytesReceived()) bytes")
+                print("  Connected at: \(stats.connectedAt().toHumanDatetime())")
+                
+                if let latency = stats.latency() {
+                    let latencyMs = latency.timeInterval * 1000
+                    print("  Latency: \(String(format: "%.2f", latencyMs)) ms")
+                } else {
+                    print("  Latency: Not available")
+                }
+            }
+            
+            try await Task.sleep(nanoseconds: interval * 1_000_000_000)
+        }
+    }
+}
+
+func main() async throws {
+    initLogger(level: LogLevel.info)
+    
+    // List of relays to monitor
+    let relays = [
+        "wss://relay.damus.io",
+        "wss://relay.nostr.band",
+        "wss://nos.lol",
+        "wss://nostr.wine"
+    ]
+    
+    let monitor = RelayMonitor(relayUrls: relays)
+    try await monitor.connect()
+    try await monitor.monitor(interval: 15)  // Check every 15 seconds
+}
+```
+
+### Simple Bot Responder
+
+```swift
+import Foundation
+import NostrSDK
+
+class SimpleBot {
+    let keys: Keys
+    let pubkey: PublicKey
+    let signer: NostrSigner
+    let client: Client
+    let commandPrefix: String
+    var commands: [String: [String: Any]] = [:]
+    let now: Timestamp
+    
+    init(privateKey: String, commandPrefix: String = "!") throws {
+        self.keys = try Keys.parse(secretKey: privateKey)
+        self.pubkey = self.keys.publicKey()
+        self.signer = NostrSigner.keys(keys: self.keys)
+        self.client = Client(signer: self.signer)
+        self.commandPrefix = commandPrefix
+        self.now = Timestamp.now()
+        
+        // Initialize default commands
+        self.registerCommand(name: "help", handler: self.cmdHelp, description: "Show available commands")
+        self.registerCommand(name: "echo", handler: self.cmdEcho, description: "Echo back your message")
+        self.registerCommand(name: "about", handler: self.cmdAbout, description: "About this bot")
+    }
+    
+    func registerCommand(name: String, handler: @escaping (String, Event) async -> String?, description: String = "") {
+        self.commands[name] = [
+            "handler": handler,
+            "description": description
+        ]
+    }
+    
+    func connect(relays: [String]) async throws {
+        for relay in relays {
+            try await self.client.addRelay(url: relay)
+        }
+        await self.client.connect()
+        print("Bot connected as \(try self.pubkey.toBech32())")
+        
+        // Set up metadata
+        try await self.setupProfile()
+    }
+    
+    func setupProfile() async throws {
+        let metadata = Metadata()
+            .setName(name: "Nostr Bot")
+            .setDisplayName(displayName: "Simple Nostr Bot")
+            .setAbout(about: "I'm a simple bot that responds to commands. Try !help")
+            .setPicture(picture: "https://example.com/bot-avatar.jpg")
+        
+        try await self.client.setMetadata(metadata: metadata)
+        print("Bot profile updated")
+    }
+    
+    func start() async throws {
+        // Create filter for messages mentioning our pubkey
+        let mentionFilter = Filter().pubkey(pubkey: self.pubkey).kinds(kinds: [Kind(kind: 1)]).limit(limit: 0)
+        let pubkeyFilter = Filter().kinds(kinds: [Kind(kind: 1)]).limit(limit: 0).pubkeys(pubkeys: [self.pubkey])
+        
+        // Subscribe to filters
+        try await self.client.subscribe(filter: mentionFilter, opts: nil)
+        try await self.client.subscribe(filter: pubkeyFilter, opts: nil)
+        
+        // Set up notification handler
+        try await self.client.handleNotifications(handler: BotNotificationHandler(bot: self))
+        
+        print("Bot is now listening for commands")
+        
+        // Keep the bot running
+        while true {
+            try await Task.sleep(nanoseconds: 60_000_000_000) // 60 seconds
+        }
+    }
+    
+    class BotNotificationHandler: HandleNotification {
+        let bot: SimpleBot
+        
+        init(bot: SimpleBot) {
+            self.bot = bot
+        }
+        
+        func handle(relayUrl: String, subscriptionId: String, event: Event) async {
+            // Skip old events
+            if event.createdAt().asSecs() < self.bot.now.asSecs() {
+                return
+            }
+            
+            // Check if it's a text note (kind 1)
+            if event.kind().asU16() == 1 {
+                // Process potential command
+                await self.bot.processEvent(event: event, relayUrl: relayUrl)
+            }
+        }
+        
+        func handleMsg(relayUrl: String, msg: RelayMessage) async {
+            // Handle any raw messages if needed
+        }
+    }
+    
+    func processEvent(event: Event, relayUrl: String) async {
+        // Check if our public key is mentioned in tags
+        var isMentioned = false
+        for tag in event.tags().toVec() {
+            if tag.kind() == TagKind.publicKey && tag.asVec()[1] == self.pubkey.toHex() {
+                isMentioned = true
+                break
+            }
+        }
+        
+        // Skip if we're not mentioned and it's not a DM to us
+        if !isMentioned && !event.content().contains(self.pubkey.toHex()) {
+            return
+        }
+        
+        let content = event.content()
+        let author = event.author()
+        
+        // Look for commands with our prefix
+        let commandPattern = "\(commandPrefix)([a-zA-Z0-9_]+)(?:\\s+(.+)?)?"
+        if let commandMatch = content.range(of: commandPattern, options: .regularExpression) {
+            let matchString = String(content[commandMatch])
+            let parts = matchString.dropFirst(commandPrefix.count).split(maxSplits: 1) { $0.isWhitespace }
+            
+            let command = String(parts[0]).lowercased()
+            let args = parts.count > 1 ? String(parts[1]) : ""
+            
+            print("Command received from \(try? author.toBech32() ?? "unknown"): \(command) \(args)")
+            
+            // Execute command if registered
+            if let commandInfo = self.commands[command] {
+                if let handler = commandInfo["handler"] as? (String, Event) async -> String? {
+                    if let response = await handler(args, event) {
+                        try? await self.sendReply(event: event, content: response)
+                    }
+                }
+            } else {
+                try? await self.sendReply(event: event, content: "Unknown command: \(command). Try \(self.commandPrefix)help")
+            }
+        }
+    }
+    
+    func sendReply(event: Event, content: String) async throws {
+        let builder = EventBuilder.textNote(content: content)
+            .tags(tags: [
+                Tag.event(eventId: event.id()),  // Reference to the event we're replying to
+                Tag.publicKey(publicKey: event.author())  // Mention the author
+            ])
+        
+        let output = try await self.client.sendEventBuilder(builder: builder)
+        print("Reply sent: \(try output.id.toBech32())")
+    }
+    
+    // Command handlers
+    func cmdHelp(args: String, event: Event) async -> String? {
+        var helpText = "Available commands:\n\n"
+        for (cmd, info) in self.commands {
+            helpText += "\(self.commandPrefix)\(cmd): \(info["description"] as? String ?? "")\n"
+        }
+        return helpText
+    }
+    
+    func cmdEcho(args: String, event: Event) async -> String? {
+        if !args.isEmpty {
+            return "Echo: \(args)"
+        } else {
+            return "You didn't provide anything to echo!"
+        }
+    }
+    
+    func cmdAbout(args: String, event: Event) async -> String? {
+        return "I'm a simple Nostr bot built with the rust-nostr Swift bindings. My code is running on the latest version of the library."
+    }
+}
+
+// Example usage
+func main() async throws {
+    initLogger(level: LogLevel.info)
+    
+    // Initialize bot with your private key
+    let bot = try SimpleBot(privateKey: "nsec1ufnus6pju578ste3v90xd5m2decpuzpql2295m3sknqcjzyys9ls0qlc85")
+    
+    // Connect to relays
+    try await bot.connect(relays: ["wss://relay.damus.io", "wss://nos.lol"])
+    
+    // Register additional custom commands
+    bot.registerCommand(
+        name: "ping",
+        handler: { args, event in
+            return "Pong! I'm alive and responding."
+        },
+        description: "Check if bot is alive"
+    )
+    
+    // Start the bot
+    try await bot.start()
+}
+```
+
+
