@@ -1,0 +1,1278 @@
+# Rust-Nostr JavaScript Bindings - Complete Guide
+
+This guide provides comprehensive information for building Nostr applications using the rust-nostr JavaScript bindings. It's designed as a reference for developers working with the Nostr protocol through these bindings.
+
+## Table of Contents
+- [Introduction to Nostr](#introduction-to-nostr)
+- [Getting Started](#getting-started)
+- [Key Management](#key-management)
+- [Events](#events)
+- [Filters](#filters)
+- [Relays and Clients](#relays-and-clients)
+- [Common NIPs Implementation](#common-nips-implementation)
+- [Advanced Features](#advanced-features)
+- [Practical Examples](#practical-examples)
+
+## Introduction to Nostr
+
+Nostr (Notes and Other Stuff Transmitted by Relays) is a simple, open protocol that enables global, decentralized, and censorship-resistant social media. It uses public key cryptography and a network of relays for message distribution.
+
+Core components:
+- **Events**: The basic data structure containing content
+- **Keys**: Public/private key pairs for signing and identity
+- **Relays**: Servers that receive, store, and serve events
+- **Clients**: Applications that interact with relays to publish and fetch events
+
+## Getting Started
+
+### Installation
+
+```bash
+npm install @rust-nostr/nostr-sdk
+```
+
+### Basic Hello World
+
+```javascript
+import { Keys, Client, EventBuilder, NostrSigner, loadWasmAsync } from "@rust-nostr/nostr-sdk";
+
+async function hello() {
+    // Load WASM
+    await loadWasmAsync();
+    
+    // Generate keys
+    const keys = Keys.generate();
+    const signer = NostrSigner.keys(keys);
+    const client = new Client(signer);
+    
+    // Connect to a relay
+    await client.addRelay("wss://relay.damus.io");
+    await client.connect();
+    
+    // Publish a note
+    const builder = EventBuilder.textNote("Hello, rust-nostr!");
+    const output = await client.sendEventBuilder(builder);
+    
+    // Print results
+    console.log(`Event ID: ${output.id.toBech32()}`);
+    console.log(`Sent to: ${output.success}`);
+    console.log(`Not sent to: ${output.failed}`);
+}
+
+hello();
+```
+
+## Key Management
+
+### Generating and Managing Keys
+
+```javascript
+import { Keys, SecretKey, loadWasmSync } from "@rust-nostr/nostr-sdk";
+
+// Load WASM
+loadWasmSync();
+
+// Generate new keys
+const keys = Keys.generate();
+const publicKey = keys.publicKey;
+const secretKey = keys.secretKey;
+
+console.log(`Public key (hex): ${publicKey.toHex()}`);
+console.log(`Secret key (hex): ${secretKey.toHex()}`);
+console.log(`Public key (bech32): ${publicKey.toBech32()}`);
+console.log(`Secret key (bech32): ${secretKey.toBech32()}`);
+
+// Restore keys from nsec or hex
+const restoredKeys = Keys.parse("nsec1j4c6269y9w0q2er2xjw8sv2ehyrtfxq3jwgdlxj6qfn8z4gjsq5qfvfk99");
+```
+
+### Using Seed Phrases (NIP-06)
+
+```javascript
+import { Keys, loadWasmSync } from "@rust-nostr/nostr-sdk";
+import { generateMnemonic } from "bip39"; // Need to install bip39 package
+
+// Load WASM
+loadWasmSync();
+
+// Generate 24-word seed phrase
+const words256 = generateMnemonic(256);
+console.log(`Seed Words (24): ${words256}`);
+const passphrase256 = "";
+
+// Generate keys from seed phrase
+const keys256 = Keys.fromMnemonic(words256, passphrase256);
+
+console.log(`Private (hex): ${keys256.secretKey.toHex()}`);
+console.log(`Private (nsec): ${keys256.secretKey.toBech32()}`);
+console.log(`Public (hex): ${keys256.publicKey.toHex()}`);
+console.log(`Public (npub): ${keys256.publicKey.toBech32()}`);
+
+// Multiple accounts from same seed phrase
+const words = "leader monkey parrot ring guide accident before fence cannon height naive bean";
+const passphrase = "";
+
+// Generate multiple accounts from same seed
+for (let account = 0; account < 3; account++) {
+    const nsec = Keys.fromMnemonic(words, passphrase, account).secretKey.toBech32();
+    console.log(`Account #${account} bech32: ${nsec}`);
+}
+```
+
+### Encrypted Private Keys (NIP-49)
+
+```javascript
+import { SecretKey, EncryptedSecretKey, KeySecurity, loadWasmSync } from "@rust-nostr/nostr-sdk";
+
+// Load WASM
+loadWasmSync();
+
+// Parse secret key
+const secretKey = SecretKey.parse("3501454135014541350145413501453fefb02227e449e57cf4d3a3ce05378683");
+
+// Encrypt with default settings
+const password = "nostr";
+const encrypted = secretKey.encrypt(password);
+console.log(`Encrypted secret key: ${encrypted.toBech32()}`);
+
+// Custom encryption parameters
+const encryptedCustom = new EncryptedSecretKey(secretKey, password, 12, KeySecurity.WEAK);
+console.log(`Encrypted secret key (custom): ${encryptedCustom.toBech32()}`);
+
+// Decrypt
+const encryptedFromBech32 = EncryptedSecretKey.fromBech32("ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p");
+const decryptedKey = encryptedFromBech32.asSecretKey("nostr");
+console.log(`Decrypted secret key: ${decryptedKey.toBech32()}`);
+```
+
+## Events
+
+Events are the core data structure in Nostr. Each event has a defined kind that specifies its purpose.
+
+### Event Structure
+
+```json
+{
+  "id": "<32-bytes lowercase hex-encoded sha256 of the serialized event data>",
+  "pubkey": "<32-bytes lowercase hex-encoded public key of the event creator>",
+  "created_at": <unix timestamp in seconds>,
+  "kind": <integer between 0 and 65535>,
+  "tags": [
+    ["<tag-identifier>", "<tag-value>", ...],
+    // ...
+  ],
+  "content": "<arbitrary string>",
+  "sig": "<64-bytes lowercase hex of the signature of the sha256 hash of the serialized event data>"
+}
+```
+
+### Creating Events with EventBuilder
+
+```javascript
+import { Keys, EventBuilder, Tag, Timestamp, Kind, loadWasmSync, NostrSigner } from "@rust-nostr/nostr-sdk";
+
+// Load WASM
+loadWasmSync();
+
+async function createEvents() {
+    const keys = Keys.generate();
+    const signer = NostrSigner.keys(keys);
+    
+    // Standard text note (kind 1)
+    const builder1 = EventBuilder.textNote("Hello");
+    const event1 = await builder1.sign(signer);
+    console.log(event1.asJson());
+    
+    // Custom event with additional options
+    const tag = Tag.alt("POW text-note");
+    const customTimestamp = Timestamp.fromSecs(1737976769);
+    const builder2 = EventBuilder.textNote("Hello with POW")
+        .tags([tag])
+        .pow(20)
+        .customCreatedAt(customTimestamp);
+    const event2 = await builder2.sign(signer);
+    console.log(event2.asJson());
+    
+    // Custom kind event
+    const kind = new Kind(33001); // Custom kind
+    const builder3 = new EventBuilder(kind, "My custom event");
+    const event3 = await builder3.sign(signer);
+    console.log(event3.asJson());
+}
+
+createEvents();
+```
+
+### Working with Event IDs
+
+```javascript
+import { EventId, Keys, Timestamp, Kind, EventBuilder, loadWasmSync, Tags } from "@rust-nostr/nostr-sdk";
+
+// Load WASM
+loadWasmSync();
+
+// Generate keys for examples
+const keys = Keys.generate();
+
+// Create event ID directly (rarely needed)
+const eventId = new EventId(keys.publicKey, Timestamp.now(), new Kind(1), new Tags(), "");
+
+// Convert formats
+const eventIdHex = eventId.toHex();
+const eventIdBech32 = eventId.toBech32();
+const eventIdNostrUri = eventId.toNostrUri();
+const eventIdBytes = eventId.asBytes();
+
+// Parse formats
+const fromHex = EventId.parse(eventIdHex);
+const fromBech32 = EventId.parse(eventIdBech32);
+const fromUri = EventId.parse(eventIdNostrUri);
+const fromBytes = EventId.fromSlice(eventIdBytes);
+
+// Get ID from an event
+const event = EventBuilder.textNote("This is a note").signWithKeys(keys);
+console.log(`Event ID: ${event.id.toBech32()}`);
+console.log(`Verify the ID & Signature: ${event.verify()}`);
+console.log(`Verify the ID Only: ${event.verifyId()}`);
+```
+
+### Event Kinds
+
+```javascript
+import { Kind, Keys, EventBuilder, Metadata, loadWasmSync } from "@rust-nostr/nostr-sdk";
+
+// Load WASM
+loadWasmSync();
+
+// Create kind from integer
+const kind1 = new Kind(1);  // Text note
+const kind0 = new Kind(0);  // Metadata
+const kind3 = new Kind(3);  // Contacts list
+
+// Testing kind properties
+const customKind = new Kind(30001);
+console.log(`Is addressable?: ${customKind.isAddressable()}`);  // Kinds 30000-39999
+
+const kindEphemeral = new Kind(20001);
+console.log(`Is ephemeral?: ${kindEphemeral.isEphemeral()}`);  // Kinds 20000-29999
+
+const kindReplaceable = new Kind(10001);
+console.log(`Is replaceable?: ${kindReplaceable.isReplaceable()}`);  // Kinds 10000-19999
+```
+
+### JSON Serialization
+
+```javascript
+import { Event, loadWasmSync } from "@rust-nostr/nostr-sdk";
+
+// Load WASM
+loadWasmSync();
+
+// Parse event from JSON
+const jsonStr = '{"content":"uRuvYr585B80L6rSJiHocw==?iv=oh6LVqdsYYol3JfFnXTbPA==","created_at":1640839235,"id":"2be17aa3031bdcb006f0fce80c146dea9c1c0268b0af2398bb673365c6444d45","kind":4,"pubkey":"f86c44a2de95d9149b51c6a29afeabba264c18e2fa7c49de93424a0c56947785","sig":"a5d9290ef9659083c490b303eb7ee41356d8778ff19f2f91776c8dc4443388a64ffcf336e61af4c25c05ac3ae952d1ced889ed655b67790891222aaa15b99fdd","tags":[["p","13adc511de7e1cfcf1c6b7f6365fb5a03442d7bcacf565ea57fa7770912c023d"]]}';
+
+const event = Event.fromJson(jsonStr);
+
+// Serialize to JSON
+const jsonOutput = event.asJson();
+console.log(jsonOutput);
+```
+
+## Tags
+
+Tags are multi-purpose arrays attached to events that provide additional context and create relationships between events.
+
+### Common Tags
+
+```javascript
+import { EventBuilder, Keys, Tag, Coordinate, Kind, RelayMetadata, loadWasmSync } from "@rust-nostr/nostr-sdk";
+
+// Load WASM
+loadWasmSync();
+
+// Generate keys for examples
+const keys = Keys.generate();
+const event = EventBuilder.textNote("Hello World!").signWithKeys(keys);
+
+// Single Letter Tags
+const tagEvent = Tag.event(event.id);  // e tag: reference an event
+const tagPubkey = Tag.publicKey(keys.publicKey);  // p tag: reference a pubkey
+const tagCoordinate = Tag.coordinate(new Coordinate(new Kind(0), keys.publicKey));  // a tag: reference an addressable event
+const tagIdentifier = Tag.identifier("my-identifier");  // d tag: unique identifier
+const tagRelay = Tag.relayMetadata("wss://relay.example.com", RelayMetadata.READ);  // r tag: relay hint
+const tagHashtag = Tag.hashtag("#nostr");  // t tag: hashtag
+
+// Custom Tags
+const tagCustom = Tag.parse(["custom", "value1", "value2"]);
+const tagAlt = Tag.alt("Alternative text");
+
+// Access tag properties
+console.log(`Tag kind: ${tagPubkey.kind()}`);
+console.log(`Tag as vector: ${tagPubkey.asVec()}`);
+```
+
+## Filters
+
+Filters are used to query events from relays.
+
+### Creating Filters
+
+```javascript
+import { Filter, Keys, Kind, EventBuilder, Timestamp, loadWasmSync } from "@rust-nostr/nostr-sdk";
+
+// Load WASM
+loadWasmSync();
+
+// Generate keys for examples
+const keys = Keys.generate();
+const event = EventBuilder.textNote("Hello World!").signWithKeys(keys);
+
+// Filter for specific event ID
+const filterId = new Filter().id(event.id);
+
+// Filter for specific author
+const filterAuthor = new Filter().author(keys.publicKey);
+
+// Filter by pubkey and kind
+const filterPkKind = new Filter().pubkey(keys.publicKey).kind(new Kind(1));
+
+// Filter by search string
+const filterSearch = new Filter().search("Nostr Protocol");
+
+// Filter with timeframe
+const date = new Date(2009, 1, 3, 0, 0);
+const timestamp = Math.floor(date.getTime() / 1000);
+const sinceTs = Timestamp.fromSecs(timestamp);
+const untilTs = Timestamp.now();
+
+const filterTimeframe = new Filter()
+    .pubkey(keys.publicKey)
+    .since(sinceTs)
+    .until(untilTs);
+
+// Limit results
+const filterLimit = new Filter().author(keys.publicKey).limit(10);
+
+// Filter for hashtags
+const filterHashtags = new Filter().hashtags(["#Bitcoin", "#Nostr"]);
+
+// Filter for references
+const filterReference = new Filter().reference("My reference");
+
+// Modifying filters
+const filterMulti = new Filter()
+    .pubkeys([keys.publicKey])
+    .kinds([new Kind(0), new Kind(1)]);
+
+// Add an additional kind
+const updatedFilter = filterMulti.kinds([new Kind(4)]);
+
+// Remove filters
+const filterWithRemovedKinds = updatedFilter.removeKinds([new Kind(0)]);
+
+// Testing if an event matches a filter
+const doesMatch = filterPkKind.matchEvent(event);
+```
+
+## Relays and Clients
+
+### Basic Client Usage
+
+```javascript
+import { Keys, Client, EventBuilder, NostrSigner, Filter, Kind, Timestamp, Metadata, loadWasmAsync } from "@rust-nostr/nostr-sdk";
+
+async function clientExample() {
+    // Load WASM
+    await loadWasmAsync();
+    
+    // Initialize keys and client
+    const keys = Keys.generate();
+    const signer = NostrSigner.keys(keys);
+    const client = new Client(signer);
+    
+    // Add relays and connect
+    await client.addRelay("wss://relay.damus.io");
+    await client.addRelay("wss://nos.lol");
+    await client.connect();
+    
+    // Send a text note
+    const noteBuilder = EventBuilder.textNote("Hello from rust-nostr JavaScript bindings!");
+    const noteOutput = await client.sendEventBuilder(noteBuilder);
+    console.log(`Note sent: ${noteOutput.id.toBech32()}`);
+    
+    // Create and send metadata
+    const metadata = new Metadata()
+        .name("Test User")
+        .displayName("Tester")
+        .about("Testing Nostr");
+    await client.setMetadata(metadata);
+    
+    // Fetch events with a filter
+    const filter = new Filter()
+        .authors([keys.publicKey])
+        .kinds([new Kind(0), new Kind(1)]);
+    
+    // Create timeout (10 seconds)
+    const timeoutMs = 10 * 1000;
+    const events = await client.fetchEvents([filter], timeoutMs);
+    
+    events.toVec().forEach(event => {
+        console.log(event.asJson());
+    });
+}
+
+clientExample();
+```
+
+### Client with Options
+
+```javascript
+import { Keys, ClientBuilder, Options, EventBuilder, Connection, ConnectionTarget, loadWasmAsync } from "@rust-nostr/nostr-sdk";
+
+async function clientWithOptions() {
+    // Load WASM
+    await loadWasmAsync();
+    
+    // Configure client with proxy for onion relays
+    const connection = new Connection().addr("127.0.0.1:9050").target(ConnectionTarget.ONION);
+    const opts = new Options().connection(connection);
+    
+    // Build client with options
+    const client = new ClientBuilder().opts(opts).build();
+    
+    // Connect to relays including .onion ones
+    await client.addRelay("wss://relay.damus.io");
+    await client.addRelay("ws://oxtrdevav64z64yb7x6rjg4ntzqjhedm5b5zjqulugknhzr46ny2qbad.onion");
+    await client.connect();
+    
+    // Create and sign an event
+    const keys = Keys.generate();
+    const event = EventBuilder.textNote("Hello from rust-nostr JavaScript bindings!").signWithKeys(keys);
+    
+    // Send the event
+    const output = await client.sendEvent(event);
+    console.log(`Event sent: ${output.id.toBech32()}`);
+}
+
+clientWithOptions();
+```
+
+### Monitoring Relays
+
+```javascript
+import { Client, loadWasmAsync } from "@rust-nostr/nostr-sdk";
+
+async function monitorRelays() {
+    // Load WASM
+    await loadWasmAsync();
+    
+    const client = new Client();
+    
+    await client.addRelay("wss://relay.damus.io");
+    await client.addRelay("wss://nostr.wine");
+    await client.addRelay("wss://relay.nostr.info");
+    await client.connect();
+    
+    // Get and print relay statistics
+    const relays = await client.relays();
+    for (const [url, relay] of Object.entries(relays)) {
+        const stats = relay.stats();
+        console.log(`Relay: ${url}`);
+        console.log(`Connected: ${relay.isConnected()}`);
+        console.log(`Status: ${relay.status()}`);
+        console.log("Stats:");
+        console.log(`    Attempts: ${stats.attempts()}`);
+        console.log(`    Success: ${stats.success()}`);
+        console.log(`    Bytes sent: ${stats.bytesSent()}`);
+        console.log(`    Bytes received: ${stats.bytesReceived()}`);
+        console.log(`    Connected at: ${stats.connectedAt().toHumanDatetime()}`);
+        
+        const latency = stats.latency();
+        if (latency) {
+            console.log(`    Latency: ${latency * 1000} ms`);
+        }
+    }
+}
+
+monitorRelays();
+```
+
+### Handling Events with Notifications
+
+```javascript
+import { Client, Keys, Filter, Tag, Timestamp, Kind, NostrSigner, loadWasmAsync } from "@rust-nostr/nostr-sdk";
+
+// This is a simplification as JS bindings handle notifications differently
+async function handleNotifications() {
+    // Load WASM
+    await loadWasmAsync();
+    
+    const keys = Keys.parse("nsec1ufnus6pju578ste3v90xd5m2decpuzpql2295m3sknqcjzyys9ls0qlc85");
+    const pk = keys.publicKey();
+    console.log(`Bot public key: ${pk.toBech32()}`);
+    
+    const signer = NostrSigner.keys(keys);
+    const client = new Client(signer);
+    
+    await client.addRelay("wss://relay.damus.io");
+    await client.connect();
+    
+    const now = Timestamp.now();
+    
+    // Subscribe to events
+    const filter = new Filter().pubkey(pk).kind(new Kind(1)).limit(0);
+    const subscription = await client.subscribe([filter]);
+    
+    // Setup notification handler
+    client.notifications.on('event', async (relay, subId, event) => {
+        console.log(`Received new event from ${relay}: ${event.asJson()}`);
+        
+        // Process different kinds of events
+        if (event.kind.asU16() === 1) {  // Text note
+            console.log(`Got note: ${event.content}`);
+            // Reply example
+            if (event.createdAt.asSecs() >= now.asSecs()) {
+                const reply = EventBuilder.textNote(`Thanks for your message: ${event.content}`)
+                    .tags([Tag.event(event.id), Tag.publicKey(event.author)]);
+                await client.sendEventBuilder(reply);
+            }
+        }
+    });
+    
+    // Keep the script running
+    await new Promise(resolve => setTimeout(resolve, 60000));
+}
+
+handleNotifications();
+```
+
+## Common NIPs Implementation
+
+### NIP-01: Metadata (Kind 0)
+
+```javascript
+import { Keys, Metadata, EventBuilder, loadWasmSync } from "@rust-nostr/nostr-sdk";
+
+// Load WASM
+loadWasmSync();
+
+// Create metadata
+const metadata = new Metadata()
+    .name("TestName")
+    .displayName("DisplayName")
+    .about("About me")
+    .website("https://example.com/")
+    .picture("https://example.com/avatar.jpg")
+    .banner("https://example.com/banner.jpg")
+    .nip05("user@example.com");
+
+// Build metadata event
+const builder = EventBuilder.metadata(metadata);
+const keys = Keys.generate();
+const event = builder.signWithKeys(keys);
+
+// Deserialize metadata
+const metadataFromEvent = Metadata.fromJson(event.content);
+console.log(`Name: ${metadataFromEvent.getName()}`);
+console.log(`Display name: ${metadataFromEvent.getDisplayName()}`);
+console.log(`About: ${metadataFromEvent.getAbout()}`);
+```
+
+### NIP-05: DNS Verification
+
+```javascript
+import { Metadata, PublicKey, verifyNip05, getNip05Profile, loadWasmAsync } from "@rust-nostr/nostr-sdk";
+
+async function nip05Example() {
+    // Load WASM
+    await loadWasmAsync();
+    
+    // Create metadata with NIP-05
+    const metadata = new Metadata()
+        .name("username")
+        .nip05("username@example.com");
+    
+    // Verify NIP-05
+    const nip05 = "yuki@yukikishimoto.com";
+    const publicKey = PublicKey.parse("npub1drvpzev3syqt0kjrls50050uzf25gehpz9vgdw08hvex7e0vgfeq0eseet");
+    
+    if (await verifyNip05(publicKey, nip05)) {
+        console.log(`'${nip05}' verified for ${publicKey.toBech32()}`);
+    } else {
+        console.log(`Unable to verify NIP-05 for ${publicKey.toBech32()}`);
+    }
+    
+    // Get profile from NIP-05
+    const profile = await getNip05Profile(nip05);
+    console.log(`${nip05} Public key: ${profile.publicKey().toBech32()}`);
+}
+
+nip05Example();
+```
+
+### NIP-19: Human-readable IDs (bech32)
+
+```javascript
+import { Keys, EventBuilder, Nip19Profile, Nip19Event, Coordinate, Kind, Nip19Coordinate, loadWasmSync } from "@rust-nostr/nostr-sdk";
+
+// Load WASM
+loadWasmSync();
+
+// Generate keys for examples
+const keys = Keys.generate();
+const event = EventBuilder.textNote("Hello from rust-nostr JavaScript bindings!").signWithKeys(keys);
+
+// Basic bech32 encodings
+console.log(`Public key: ${keys.publicKey.toBech32()}`);  // npub
+console.log(`Secret key: ${keys.secretKey.toBech32()}`);  // nsec
+console.log(`Event ID: ${event.id.toBech32()}`);  // note
+
+// NIP-19 profiles (nprofile)
+const relays = ["wss://relay.damus.io"];
+const nprofile = new Nip19Profile(keys.publicKey, relays);
+console.log(`Profile (bech32): ${nprofile.toBech32()}`);
+
+// Decode NIP-19 profile
+const decodeNprofile = Nip19Profile.fromBech32(nprofile.toBech32());
+console.log(`Decoded profile: ${decodeNprofile.publicKey().toBech32()}`);
+
+// NIP-19 events (nevent)
+const nevent = new Nip19Event(event.id, keys.publicKey, undefined, relays);
+console.log(`Event (bech32): ${nevent.toBech32()}`);
+
+// Decode NIP-19 event
+const decodeNevent = Nip19Event.fromBech32(nevent.toBech32());
+console.log(`Decoded event: ${decodeNevent.eventId().toBech32()}`);
+
+// NIP-19 coordinate (naddr)
+const coord = new Coordinate(new Kind(0), keys.publicKey);
+const coordinate = new Nip19Coordinate(coord, []);
+console.log(`Coordinate (bech32): ${coordinate.toBech32()}`);
+
+// Decode NIP-19 coordinate
+const decodeCoord = Nip19Coordinate.fromBech32(coordinate.toBech32());
+console.log(`Decoded coordinate: ${decodeCoord}`);
+```
+
+### NIP-21: Nostr URI scheme
+
+```javascript
+import { Keys, PublicKey, EventBuilder, EventId, Nip19Profile, Nip19Event, Coordinate, Nip19Coordinate, Kind, loadWasmSync } from "@rust-nostr/nostr-sdk";
+
+// Load WASM
+loadWasmSync();
+
+// Generate keys for examples
+const keys = Keys.generate();
+const event = EventBuilder.textNote("Hello from rust-nostr JavaScript bindings!").signWithKeys(keys);
+
+// Public key URI
+const pkUri = keys.publicKey.toNostrUri();
+console.log(`Public key URI: ${pkUri}`);  // nostr:npub...
+
+// Event URI
+const noteUri = event.id.toNostrUri();
+console.log(`Event URI: ${noteUri}`);  // nostr:note...
+
+// Profile URI
+const relays = ["wss://relay.damus.io"];
+const nprofile = new Nip19Profile(keys.publicKey, relays);
+const nprofileUri = nprofile.toNostrUri();
+console.log(`Profile URI: ${nprofileUri}`);  // nostr:nprofile...
+
+// Profile from URI
+const nprofileBech32 = Nip19Profile.fromNostrUri(nprofileUri).toBech32();
+console.log(`Profile (bech32): ${nprofileBech32}`);
+
+// Event with metadata URI
+const nevent = new Nip19Event(event.id, keys.publicKey, undefined, relays);
+const neventUri = nevent.toNostrUri();
+console.log(`Event with metadata URI: ${neventUri}`);  // nostr:nevent...
+
+// Event from URI
+const neventBech32 = Nip19Event.fromNostrUri(neventUri).toBech32();
+console.log(`Event (bech32): ${neventBech32}`);
+
+// Coordinate URI
+const coordinate = new Nip19Coordinate(new Coordinate(new Kind(0), keys.publicKey), []);
+const coordUri = coordinate.toNostrUri();
+console.log(`Coordinate URI: ${coordUri}`);  // nostr:naddr...
+```
+
+### NIP-44: Encrypted Messages
+
+```javascript
+import { Keys, PublicKey, nip44Encrypt, nip44Decrypt, NIP44Version, loadWasmSync } from "@rust-nostr/nostr-sdk";
+
+// Load WASM
+loadWasmSync();
+
+// Encrypt and decrypt messages using NIP-44
+const keys = Keys.generate();
+const targetPk = PublicKey.parse("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+
+// Encrypt a message
+const ciphertext = nip44Encrypt(keys.secretKey, targetPk, "my secret message", NIP44Version.V2);
+console.log(`Encrypted: ${ciphertext}`);
+
+// Decrypt a message
+const plaintext = nip44Decrypt(keys.secretKey, targetPk, ciphertext);
+console.log(`Decrypted: ${plaintext}`);
+```
+
+### NIP-57: Zaps (Lightning Payments)
+
+```javascript
+import { Keys, ZapRequestData, PublicKey, SecretKey, EventBuilder, loadWasmSync } from "@rust-nostr/nostr-sdk";
+import { nip57AnonZapRequest, nip57PrivateZapRequest, nip57DecryptPrivateZapMessage } from "@rust-nostr/nostr-sdk";
+
+// Load WASM
+loadWasmSync();
+
+// Set up sender keys
+const secretKey = SecretKey.parse("6b911fd37cdf5c81d4c0adb1ab7fa822ed253ab0ad9aa18d77257c88b29b718e");
+const keys = new Keys(secretKey);
+
+// Set up recipient public key and relays
+const publicKey = PublicKey.parse("npub14f8usejl26twx0dhuxjh9cas7keav9vr0v8nvtwtrjqx3vycc76qqh9nsy");
+const relays = ["wss://relay.damus.io"];
+const msg = "Zap!";
+const data = new ZapRequestData(publicKey, relays).message(msg);
+
+// Create various types of zap requests
+const publicZap = EventBuilder.publicZapRequest(data).signWithKeys(keys);
+console.log(`Public zap request: ${publicZap.asJson()}`);
+
+const anonZap = nip57AnonZapRequest(data);
+console.log(`Anonymous zap request: ${anonZap.asJson()}`);
+
+const privateZap = nip57PrivateZapRequest(data, keys);
+console.log(`Private zap request: ${privateZap.asJson()}`);
+
+// Decode private zap message
+const eventMsg = nip57DecryptPrivateZapMessage(secretKey, publicKey, privateZap);
+console.log(`Private zap msg: ${eventMsg.content()}`);
+```
+
+### NIP-59: Gift Wrap (Private Routing)
+
+```javascript
+import { Keys, EventBuilder, UnwrappedGift, NostrSigner, loadWasmAsync } from "@rust-nostr/nostr-sdk";
+
+async function nip59Example() {
+    // Load WASM
+    await loadWasmAsync();
+    
+    // Sender Keys
+    const aliceKeys = Keys.parse("5c0c523f52a5b6fad39ed2403092df8cebc36318b39383bca6c00808626fab3a");
+    const aliceSigner = NostrSigner.keys(aliceKeys);
+
+    // Receiver Keys
+    const bobKeys = Keys.parse("nsec1j4c6269y9w0q2er2xjw8sv2ehyrtfxq3jwgdlxj6qfn8z4gjsq5qfvfk99");
+    const bobSigner = NostrSigner.keys(bobKeys);
+
+    // Compose rumor (unsigned event)
+    const rumor = EventBuilder.textNote("Test").build(aliceKeys.publicKey);
+
+    // Build gift wrap with sender keys
+    const gw = await EventBuilder.giftWrap(aliceSigner, bobKeys.publicKey, rumor);
+    console.log(`Gift Wrap: ${gw.asJson()}`);
+
+    // Extract rumor from gift wrap with receiver keys
+    const unwrappedGift = await UnwrappedGift.fromGiftWrap(bobSigner, gw);
+    console.log(`Sender: ${unwrappedGift.sender.toBech32()}`);
+    console.log(`Rumor: ${unwrappedGift.rumor.asJson()}`);
+}
+
+nip59Example();
+```
+
+### NIP-65: Relay List Metadata
+
+```javascript
+import { EventBuilder, Tag, RelayMetadata, RelayListItem, Kind, Keys, loadWasmSync } from "@rust-nostr/nostr-sdk";
+
+// Load WASM
+loadWasmSync();
+
+// Get Keys
+const keys = Keys.generate();
+
+// Create relay list
+const relays = [
+    new RelayListItem("wss://relay.damus.io", RelayMetadata.Read),
+    new RelayListItem("wss://relay.primal.net", RelayMetadata.Write),
+    new RelayListItem("wss://relay.nostr.band")
+];
+
+// Build/sign event
+const builder = EventBuilder.relayList(relays);
+const event = builder.signWithKeys(keys);
+console.log(`Relay list event: ${event.asJson()}`);
+
+// Alternative approach with custom tags
+const tag1 = Tag.relayMetadata("wss://relay.damus.io", RelayMetadata.READ);
+const tag2 = Tag.relayMetadata("wss://relay.primal.net", RelayMetadata.WRITE);
+const tag3 = Tag.relayMetadata("wss://relay.nostr.band");
+
+const kind = new Kind(10002);
+const customBuilder = new EventBuilder(kind, "").tags([tag1, tag2, tag3]);
+const customEvent = customBuilder.signWithKeys(keys);
+console.log(`Custom relay list event: ${customEvent.asJson()}`);
+```
+
+### NIP-94: File Metadata
+
+```javascript
+import { Keys, Client, FileMetadata, EventBuilder, loadWasmAsync } from "@rust-nostr/nostr-sdk";
+
+async function nip94Example() {
+    // Load WASM
+    await loadWasmAsync();
+    
+    // Create keys and client
+    const keys = Keys.generate();
+    const client = new Client(keys);
+    
+    await client.addRelay("wss://relay.damus.io");
+    await client.connect();
+    
+    // Create file metadata
+    const metadata = new FileMetadata(
+        "https://github.com/example/project/archive/refs/tags/v1.0.0.zip",
+        "application/zip",
+        "3951c152d38317e9ef2c095ddb280613e22b14b166f5fa5950d18773ac0a1d00"  // SHA-256 hash
+    );
+    
+    // Create and send file metadata event
+    const builder = EventBuilder.fileMetadata("Project Release v1.0.0", metadata);
+    const output = await client.sendEventBuilder(builder);
+    
+    console.log("File metadata event sent:");
+    console.log(` ID (hex): ${output.id.toHex()}`);
+    console.log(` ID (bech32): ${output.id.toBech32()}`);
+}
+
+nip94Example();
+```
+
+### NIP-98: HTTP Auth
+
+```javascript
+import { Keys, EventBuilder, Kind, Tag, loadWasmSync } from "@rust-nostr/nostr-sdk";
+import crypto from 'crypto';
+
+// Load WASM
+loadWasmSync();
+
+// Generate authentication event for HTTP request
+function createAuthEvent(url, method, payload = null, keys = null) {
+    if (!keys) {
+        keys = Keys.generate();
+    }
+    
+    // Create tags
+    const tags = [
+        Tag.parse(["u", url]),
+        Tag.parse(["method", method])
+    ];
+    
+    // Add payload hash if provided
+    if (payload) {
+        const payloadHash = crypto.createHash('sha256').update(payload).digest('hex');
+        tags.push(Tag.parse(["payload", payloadHash]));
+    }
+    
+    // Create and sign auth event
+    const event = new EventBuilder(new Kind(27235), "").tags(tags).signWithKeys(keys);
+    
+    // In a real app, you would base64 encode this for the Authorization header
+    return event;
+}
+
+// Example usage
+const keys = Keys.generate();
+const authEvent = createAuthEvent("https://api.example.com/endpoint", "POST", '{"action":"create"}', keys);
+console.log(`Auth event: ${authEvent.asJson()}`);
+```
+
+## Advanced Features
+
+### Whitelisting and Blacklisting
+
+```javascript
+import { PublicKey, ClientBuilder, Filter, Kind, AdmitPolicy, AdmitStatus, loadWasmAsync } from "@rust-nostr/nostr-sdk";
+
+// The JavaScript bindings handle policy differently than Python
+// Here's a conceptual example that will need adaptation based on the JS API
+
+async function filteringExample() {
+    // Load WASM
+    await loadWasmAsync();
+    
+    // Set up pubkeys
+    const key1 = PublicKey.parse("npub1l2vyh47mk2p0qlsku7hg0vn29faehy9hy34ygaclpn66ukqp3afqutajft");
+    const key2 = PublicKey.parse("npub1xtscya34g58tk0z605fvr788k263gsu6cy9x0mhnm87echrgufzsevkk5s");
+    
+    // Whitelist implementation would require proper JS class extending AdmitPolicy interface
+    // This is a simplified example for illustration
+    class Whitelist extends AdmitPolicy {
+        constructor() {
+            super();
+            this.allowedKeys = new Set();
+        }
+        
+        allow(key) {
+            this.allowedKeys.add(key);
+        }
+        
+        async admitEvent(relayUrl, subscriptionId, event) {
+            if (this.allowedKeys.has(event.author())) {
+                return AdmitStatus.SUCCESS;
+            }
+            return AdmitStatus.REJECTED;
+        }
+    }
+    
+    // Create and configure policy
+    const whitelist = new Whitelist();
+    whitelist.allow(key1);
+    
+    // Build client with policy
+    const whitelistClient = new ClientBuilder().admitPolicy(whitelist).build();
+    await whitelistClient.addRelay("wss://relay.damus.io");
+    await whitelistClient.connect();
+    
+    // Get events - should only return events from whitelisted key
+    const filter = new Filter().authors([key1, key2]).kind(new Kind(0));
+    const events = await whitelistClient.fetchEvents([filter], 10000); // 10 seconds
+    console.log(`Whitelisted: Received ${events.len()} events`);
+}
+
+filteringExample();
+```
+
+### Relay Limits
+
+```javascript
+import { ClientBuilder, Options, RelayLimits, loadWasmSync } from "@rust-nostr/nostr-sdk";
+
+// Load WASM
+loadWasmSync();
+
+// Set custom relay limits
+const limits = new RelayLimits().eventMaxSize(128000);  // 128 KB
+
+// Or disable all limits
+const noLimits = RelayLimits.disable();
+
+// Apply limits to options
+const opts = new Options().relayLimits(limits);
+const client = new ClientBuilder().opts(opts).build();
+
+// Use the client as normal
+// ...
+```
+
+### Timestamps
+
+```javascript
+import { Timestamp, EventBuilder, Keys, Kind, Tag, loadWasmSync } from "@rust-nostr/nostr-sdk";
+
+// Load WASM
+loadWasmSync();
+
+// Current timestamp
+const timestampNow = Timestamp.now();
+console.log(`Timestamp (human-readable): ${timestampNow.toHumanDatetime()}`);
+console.log(`Timestamp (seconds): ${timestampNow.asSecs()}`);
+
+// Parse timestamp from seconds
+const timestampFromSecs = Timestamp.fromSecs(1718737479);
+console.log(`Parsed timestamp: ${timestampFromSecs.toHumanDatetime()}`);
+
+// Create event with custom timestamp
+const keys = Keys.generate();
+const event = new EventBuilder(new Kind(1), "This is some event text.")
+    .customCreatedAt(timestampFromSecs)
+    .signWithKeys(keys);
+console.log(`Event created at: ${event.createdAt.toHumanDatetime()}`);
+
+// Timestamp in a tag (e.g. expiration)
+const tag = Tag.expiration(timestampFromSecs);
+console.log(`Expiration tag: ${tag.asStandardized()}`);
+```
+
+## Practical Examples
+
+### Create a Simple Nostr Client
+
+```javascript
+import { Keys, Client, EventBuilder, Filter, Kind, Timestamp, Metadata, PublicKey, NostrSigner, loadWasmAsync } from "@rust-nostr/nostr-sdk";
+
+class SimpleNostrClient {
+    constructor(privateKey = null) {
+        this.initialize(privateKey);
+    }
+    
+    async initialize(privateKey) {
+        // Load WASM
+        await loadWasmAsync();
+        
+        if (privateKey) {
+            this.keys = Keys.parse(privateKey);
+        } else {
+            this.keys = Keys.generate();
+            console.log(`Generated new keys. Save your private key: ${this.keys.secretKey.toBech32()}`);
+        }
+        
+        this.signer = NostrSigner.keys(this.keys);
+        this.client = new Client(this.signer);
+        this.relays = [];
+    }
+    
+    async addRelays(relayUrls) {
+        for (const url of relayUrls) {
+            await this.client.addRelay(url);
+            this.relays.push(url);
+        }
+        await this.client.connect();
+        console.log(`Connected to ${this.relays.length} relays`);
+    }
+    
+    async setupProfile(name, about = null, picture = null) {
+        const metadata = new Metadata().name(name);
+        if (about) {
+            metadata.about(about);
+        }
+        if (picture) {
+            metadata.picture(picture);
+        }
+        
+        await this.client.setMetadata(metadata);
+        console.log(`Profile updated for ${name}`);
+    }
+    
+    async publishNote(content) {
+        const builder = EventBuilder.textNote(content);
+        const output = await this.client.sendEventBuilder(builder);
+        console.log(`Note published with ID: ${output.id.toBech32()}`);
+        return output.id;
+    }
+    
+    async getRecentNotes(limit = 20) {
+        const filter = new Filter().kinds([new Kind(1)]).limit(limit);
+        const events = await this.client.fetchEvents([filter], 10000); // 10 seconds
+        
+        const notes = [];
+        for (const event of events.toVec()) {
+            const authorHex = event.author.toHex();
+            const authorBech32 = event.author.toBech32();
+            const createdAt = event.createdAt.toHumanDatetime();
+            const content = event.content;
+            
+            notes.push({
+                id: event.id.toBech32(),
+                author: {
+                    hex: authorHex,
+                    bech32: authorBech32
+                },
+                createdAt: createdAt,
+                content: content
+            });
+        }
+        
+        return notes;
+    }
+    
+    async getUserProfile(pubkey) {
+        let pubkeyObj = pubkey;
+        if (typeof pubkey === 'string' && pubkey.startsWith("npub")) {
+            pubkeyObj = PublicKey.parse(pubkey);
+        }
+        
+        const filter = new Filter().authors([pubkeyObj]).kinds([new Kind(0)]).limit(1);
+        const events = await this.client.fetchEvents([filter], 10000); // 10 seconds
+        
+        if (events.len() > 0) {
+            const event = events.toVec()[0];
+            const metadata = Metadata.fromJson(event.content);
+            
+            const profile = {
+                name: metadata.getName(),
+                displayName: metadata.getDisplayName(),
+                about: metadata.getAbout(),
+                picture: metadata.getPicture(),
+                nip05: metadata.getNip05()
+            };
+            
+            return profile;
+        }
+        
+        return null;
+    }
+}
+
+// Example usage
+async function main() {
+    // Create client with new keys or restore from existing key
+    const client = new SimpleNostrClient();  // Or new SimpleNostrClient("nsec1...");
+    
+    // Connect to relays
+    await client.addRelays(["wss://relay.damus.io", "wss://nos.lol", "wss://relay.nostr.band"]);
+    
+    // Setup profile
+    await client.setupProfile("NostrTester", "Testing the Nostr protocol", "https://example.com/avatar.jpg");
+    
+    // Publish a note
+    const noteId = await client.publishNote("Hello from my simple Nostr client!");
+    
+    // Get recent notes
+    const recentNotes = await client.getRecentNotes(10);
+    for (const note of recentNotes) {
+        console.log(`[${note.createdAt}] ${note.author.bech32}: ${note.content}`);
+    }
+    
+    // Get a user profile
+    const profile = await client.getUserProfile("npub1drvpzev3syqt0kjrls50050uzf25gehpz9vgdw08hvex7e0vgfeq0eseet");
+    if (profile) {
+        console.log(`Profile: ${profile.name} (${profile.displayName})`);
+        console.log(`About: ${profile.about}`);
+    }
+}
+
+main();
+```
+
+### Relay Monitor
+
+```javascript
+import { Client, loadWasmAsync } from "@rust-nostr/nostr-sdk";
+
+class RelayMonitor {
+    constructor(relayUrls) {
+        this.relayUrls = relayUrls;
+        this.client = new Client();
+        this.startTime = Date.now();
+    }
+    
+    async connect() {
+        // Load WASM
+        await loadWasmAsync();
+        
+        // Add relays
+        for (const url of this.relayUrls) {
+            await this.client.addRelay(url);
+        }
+        
+        // Connect to relays
+        await this.client.connect();
+        console.log(`Connected to ${this.relayUrls.length} relays`);
+    }
+    
+    async monitor(interval = 10) {
+        // Monitor relays at specified interval in seconds
+        while (true) {
+            console.log("\n" + "=".repeat(50));
+            console.log(`Relay Status Report (${new Date().toISOString()})`);
+            console.log("=".repeat(50));
+            
+            const relays = await this.client.relays();
+            for (const [url, relay] of Object.entries(relays)) {
+                const stats = relay.stats();
+                
+                // Calculate uptime percentage
+                const uptimeTotal = (Date.now() - this.startTime) / 1000;
+                const successRate = (stats.success() / Math.max(1, stats.attempts())) * 100;
+                
+                console.log(`\nRelay: ${url}`);
+                console.log(`Connected: ${relay.isConnected()}`);
+                console.log(`Status: ${relay.status()}`);
+                console.log("Stats:");
+                console.log(`  Attempts: ${stats.attempts()}`);
+                console.log(`  Success: ${stats.success()} (${successRate.toFixed(1)}%)`);
+                console.log(`  Bytes sent: ${stats.bytesSent()} bytes`);
+                console.log(`  Bytes received: ${stats.bytesReceived()} bytes`);
+                console.log(`  Connected at: ${stats.connectedAt().toHumanDatetime()}`);
+                
+                const latency = stats.latency();
+                if (latency) {
+                    const latencyMs = latency * 1000;
+                    console.log(`  Latency: ${latencyMs.toFixed(2)} ms`);
+                } else {
+                    console.log("  Latency: Not available");
+                }
+            }
+            
+            await new Promise(resolve => setTimeout(resolve, interval * 1000));
+        }
+    }
+}
+
+async function main() {
+    // List of relays to monitor
+    const relays = [
+        "wss://relay.damus.io",
+        "wss://relay.nostr.band",
+        "wss://nos.lol",
+        "wss://nostr.wine"
+    ];
+    
+    const monitor = new RelayMonitor(relays);
+    await monitor.connect();
+    await monitor.monitor(15);  // Check every 15 seconds
+}
+
+main();
+```
+
+### NIP-47: Nostr Wallet Connect (NWC)
+
+```javascript
+import { NWC, NostrWalletConnectURI, PayInvoiceRequest, MakeInvoiceRequest, loadWasmAsync } from "@rust-nostr/nostr-sdk";
+
+async function nip47Example() {
+    // Load WASM
+    await loadWasmAsync();
+    
+    // Parse NWC uri
+    const uri = NostrWalletConnectURI.parse("nostr+walletconnect://..");
+    
+    // Initialize NWC client
+    const nwc = new NWC(uri);
+    
+    // Get info
+    const info = await nwc.getInfo();
+    console.log("Supported methods: ", info.methods);
+    
+    // Get balance
+    const balance = await nwc.getBalance();
+    console.log("Balance", balance, "mSAT");
+    
+    // Pay an invoice
+    const payInvoiceParams = new PayInvoiceRequest();
+    payInvoiceParams.invoice = "lnbc..";
+    await nwc.payInvoice(payInvoiceParams);
+    
+    // Make an invoice
+    const makeInvoiceParams = new MakeInvoiceRequest();
+    makeInvoiceParams.amount = BigInt(100);
+    const result = await nwc.makeInvoice(makeInvoiceParams);
+    console.log("Invoice: " + result.invoice);
+    
+    // Cleanup
+    nwc.free();
+}
+
+nip47Example();
+```
+
+## Conclusion
+
+This guide covers the primary functionality offered by the rust-nostr JavaScript bindings. Nostr is a rapidly evolving protocol with new NIPs being developed regularly. For the most current information, refer to the official documentation:
+
+- [Rust-Nostr GitHub Repository](https://github.com/rust-nostr/nostr)
+- [Rust-Nostr JavaScript Bindings](https://github.com/rust-nostr/nostr-js)
+- [Nostr NIPs Repository](https://github.com/nostr-protocol/nips)
+
+By using the rust-nostr JavaScript bindings, you can leverage the performance and safety of Rust with the flexibility and power of JavaScript for building powerful Nostr applications.
